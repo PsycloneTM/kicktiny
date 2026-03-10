@@ -1,0 +1,8 @@
+{
+  "name": "kicktiny",
+  "version": "0.1.0",
+  "description": "Custom player overlay for Kick.com embeds",
+  "scripts": {
+    "build": "node bundle.cjs"
+  }
+}
