@@ -189,6 +189,10 @@
   transition: opacity var(--kt-trans);
 }
 
+.kt-live-badge.kt-offline {
+  background: #555;
+}
+
 .kt-viewers,
 .kt-uptime {
   color: var(--kt-dim);

@@ -8,7 +8,7 @@ export function createInfo() {
 
   const live = document.createElement('span');
   live.className = 'kt-live-badge';
-  live.textContent = 'LIVE';
+  live.textContent = '● LIVE';
 
   const viewers = document.createElement('span');
   viewers.className = 'kt-viewers';
@@ -25,6 +25,17 @@ export function createInfo() {
   async function poll() {
     if (!state.username) return;
     const data = await fetchViewers(state.username);
+    const online = data.viewers !== null || data.startTime !== null;
+    live.textContent = online ? '● LIVE' : '● OFFLINE';
+    live.classList.toggle('kt-offline', !online);
+    if (!online) {
+      viewers.textContent = '';
+      uptime.textContent = '';
+      clearInterval(uptimeTimer);
+      uptimeTimer = null;
+      startDate = null;
+      return;
+    }
     if (data.viewers !== null) viewers.textContent = fmtViewers(data.viewers) + ' watching';
     if (data.startTime) {
       const newStart = new Date(data.startTime);

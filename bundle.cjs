@@ -49,7 +49,7 @@ const cssMin = cssRaw
 const HEADER = `// ==UserScript==
 // @name         KickTiny
 // @namespace    https://github.com/reda777/kicktiny
-// @version      0.1.0
+// @version      0.1.2
 // @description  Custom player overlay for Kick.com embeds
 // @author       Reda777
 // @match        https://player.kick.com/*
