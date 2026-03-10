@@ -5,8 +5,8 @@
 // @description  Custom player overlay for Kick.com embeds
 // @author       Reda777
 // @match        https://player.kick.com/*
-// @updateURL    https://github.com/reda777/kicktiny/raw/master/dist/kicktiny.user.js
-// @downloadURL  https://github.com/reda777/kicktiny/raw/master/dist/kicktiny.user.js
+// @updateURL    https://raw.githubusercontent.com/reda777/kicktiny/main/dist/kicktiny.user.js
+// @downloadURL  https://raw.githubusercontent.com/reda777/kicktiny/main/dist/kicktiny.user.js
 // @supportURL   https://github.com/reda777/kicktiny
 // @grant        none
 // @run-at       document-start
