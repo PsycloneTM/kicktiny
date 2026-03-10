@@ -9,23 +9,20 @@ const EV = {
   MUTED_CHANGED:         'PlayerMutedChanged',
   PLAYBACK_RATE_CHANGED: 'PlayerPlaybackRateChanged',
   ERROR:                 'PlayerError',
-  REBUFFERING:           'PlayerRebuffering',
-  BUFFER_UPDATE:         'PlayerBufferUpdate',
+  RECOVERABLE_ERROR:     'PlayerRecoverableError',
 };
 
 // IVS PlayerState string literals
 const PS = {
   PLAYING:   'Playing',
   BUFFERING: 'Buffering',
-  IDLE:      'Idle',
-  READY:     'Ready',
-  ENDED:     'Ended',
 };
 
 let _player = null;
 let _retryTimer = null;
 const MAX_RETRIES = 40;
 const RETRY_INTERVAL = 500;
+const RECONNECT_CODES = new Set([-2, -3]);
 
 export function getPlayer() { return _player; }
 
@@ -193,6 +190,14 @@ function onPlayerReady() {
   p.addEventListener(EV.ERROR, err => {
     setState({ error: err });
     console.error('[KickTiny] IVS Error:', err);
+  });
+
+  p.addEventListener(EV.RECOVERABLE_ERROR, err => {
+    const code = err?.code ?? null;
+    if (RECONNECT_CODES.has(code)) {
+      console.warn('[KickTiny] IVS fatal worker error, reloading...');
+      setTimeout(() => window.location.reload(), 2000);
+    }
   });
 
   document.addEventListener('fullscreenchange', () => {
