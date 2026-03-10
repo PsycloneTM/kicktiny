@@ -5,7 +5,7 @@ A custom player overlay for Kick.com embeds. Replaces the native controls with a
 ## Install
 
 1. Install [Violentmonkey](https://violentmonkey.github.io/) or [Tampermonkey](https://www.tampermonkey.net/)
-2. Click the link below to install the script directly:
+2. Open the link below to install the script directly:
 
 ```
 https://raw.githubusercontent.com/reda777/kicktiny/main/dist/kicktiny.user.js
