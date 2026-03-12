@@ -18,11 +18,23 @@ export function openPopup(popup, triggerBtn) {
   popup.hidden = false;
   popup.style.visibility = 'hidden';
   const rect = triggerBtn.getBoundingClientRect();
-  const popupWidth = popup.offsetWidth || 120;
-  let left = rect.right - popupWidth;
+  const vw = window.innerWidth;
+  const popupW = popup.offsetWidth || 120;
+  const popupH = popup.offsetHeight || 100;
+
+  const availableH = rect.top - 8 - 4;
+  const maxH = Math.max(80, availableH);
+  popup.style.maxHeight = maxH + 'px';
+
+  let top = rect.top - Math.min(popupH, maxH) - 8;
+  if (top < 4) top = 4;
+
+  let left = rect.right - popupW;
   if (left < 4) left = 4;
+  if (left + popupW > vw - 4) left = vw - popupW - 4;
+
   popup.style.left = left + 'px';
-  popup.style.top = (rect.top - popup.offsetHeight - 8) + 'px';
+  popup.style.top = top + 'px';
   popup.style.visibility = '';
 }
 
