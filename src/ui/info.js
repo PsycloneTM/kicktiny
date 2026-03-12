@@ -71,10 +71,9 @@ export function createInfo() {
   // Pause polling when tab is hidden, resume when visible
   document.addEventListener('visibilitychange', () => {
     if (!state.username) return;
-    if (document.hidden) {
-      clearInterval(pollTimer);
-      pollTimer = null;
-    } else {
+    clearInterval(pollTimer);
+    pollTimer = null;
+    if (!document.hidden) {
       poll();
       pollTimer = setInterval(poll, 30_000);
     }
