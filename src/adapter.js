@@ -170,7 +170,7 @@ function onPlayerReady() {
         // IVS is refusing the quality — accept what it gives us and reset
         _reapplying = false;
         _reapplyAttempts = 0;
-        setState({ quality: q });
+        setState({ quality: q, autoQuality: p.isAutoQualityMode() });
         return;
       }
       if (!_reapplying) {
@@ -186,7 +186,7 @@ function onPlayerReady() {
           // Saved quality no longer in stream — accept whatever IVS gives us
           _reapplying = false;
           _reapplyAttempts = 0;
-          setState({ quality: q });
+          setState({ quality: q, autoQuality: p.isAutoQualityMode() });
         }
       }
       return;
@@ -194,7 +194,7 @@ function onPlayerReady() {
 
     _reapplying = false;
     _reapplyAttempts = 0;
-    setState({ quality: q });
+    setState({ quality: q, autoQuality: p.isAutoQualityMode() });
   });
 
   p.addEventListener(EV.VOLUME_CHANGED, e => {
