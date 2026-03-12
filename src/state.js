@@ -9,7 +9,7 @@ export const state = {
   muted: false,
   fullscreen: false,
   rate: 1,
-  catching: false,
+  atLiveEdge: true,
   username: '',
   viewers: null,
   uptime: null,

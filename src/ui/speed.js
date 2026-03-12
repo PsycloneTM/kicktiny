@@ -1,5 +1,5 @@
-import { setRate, toggleCatchUp } from '../actions.js';
-import { subscribe, state } from '../state.js';
+import { setRate } from '../actions.js';
+import { subscribe } from '../state.js';
 import { setupPopupToggle } from './popup.js';
 
 const RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
@@ -31,31 +31,16 @@ export function createSpeedBtn() {
     popup.appendChild(item);
   });
 
-  // Catch-up button
-  const catchBtn = document.createElement('button');
-  catchBtn.className = 'kt-popup-item kt-catchup-item';
-  catchBtn.dataset.catchup = 'true';
-  catchBtn.title = 'Skip to live (l)';
-  catchBtn.textContent = '⚡ Live catchup';
-  catchBtn.addEventListener('click', e => {
-    e.stopPropagation();
-    toggleCatchUp();
-    popup.hidden = true;
-  });
-  popup.appendChild(catchBtn);
-
   setupPopupToggle(btn, popup);
 
   document.body.appendChild(popup);
   wrap.append(btn);
 
-  subscribe(({ rate, catching }) => {
-    btn.textContent = catching ? '⚡' : (rate === 1 ? '1×' : rate + '×');
+  subscribe(({ rate }) => {
+    btn.textContent = rate === 1 ? '1×' : rate + '×';
     popup.querySelectorAll('.kt-popup-item[data-rate]').forEach(item => {
       item.classList.toggle('kt-active', Number(item.dataset.rate) === rate);
     });
-    const cu = popup.querySelector('[data-catchup]');
-    if (cu) cu.classList.toggle('kt-active', catching);
   });
 
   return wrap;

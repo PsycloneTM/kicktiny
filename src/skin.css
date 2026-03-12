@@ -194,6 +194,15 @@
   background: #555;
 }
 
+.kt-live-badge.kt-behind {
+  background: #555;
+  cursor: pointer;
+}
+
+.kt-live-badge.kt-behind:hover {
+  background: #eb0400;
+}
+
 .kt-viewers,
 .kt-uptime {
   color: var(--kt-dim);
@@ -248,13 +257,6 @@
   font-weight: 600;
   padding: 6px 8px;
   letter-spacing: 0.02em;
-}
-
-.kt-catchup-item {
-  border-top: 1px solid rgba(255,255,255,0.08);
-  margin-top: 4px;
-  padding-top: 11px;
-  color: var(--kt-green) !important;
 }
 
 /* ── overlay ─────────────────────────────────── */

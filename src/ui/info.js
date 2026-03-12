@@ -1,6 +1,7 @@
 import { subscribe, state, setState } from '../state.js';
 import { fmtViewers, fmtUptime } from '../utils/format.js';
 import { fetchViewers } from '../api.js';
+import { seekToLive } from '../actions.js';
 
 export function createInfo() {
   const wrap = document.createElement('div');
@@ -54,8 +55,13 @@ export function createInfo() {
     }
   }
 
-  subscribe(({ username, playing }) => {
-    live.style.opacity = playing ? '1' : '0.6';
+  live.addEventListener('click', () => {
+    if (!state.atLiveEdge) seekToLive();
+  });
+
+  subscribe(({ username, atLiveEdge }) => {
+    live.classList.toggle('kt-behind', !atLiveEdge);
+    live.title = atLiveEdge ? '' : 'Jump to live';
     if (username && !pollTimer) {
       poll();
       pollTimer = setInterval(poll, 30_000);

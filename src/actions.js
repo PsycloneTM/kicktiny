@@ -65,16 +65,12 @@ export function setRate(r) {
   p.setPlaybackRate(Math.max(0.25, Math.min(2, r)));
 }
 
-export function toggleCatchUp() {
+export function seekToLive() {
   const p = getPlayer();
   if (!p) return;
-  if (state.catching) {
-    p.setPlaybackRate(1);
-    setState({ catching: false });
-  } else {
-    p.setPlaybackRate(2);
-    setState({ catching: true });
-  }
+  const latency = p.getLiveLatency?.();
+  if (latency == null || !isFinite(latency)) return;
+  p.seekTo(p.getPosition() + latency);
 }
 
 export function toggleFullscreen() {
@@ -102,7 +98,7 @@ export function bindKeys() {
       case 'ArrowUp': e.preventDefault(); setVolume(state.volume + 5); break;
       case 'ArrowDown': e.preventDefault(); setVolume(state.volume - 5); break;
       case 'f': toggleFullscreen(); break;
-      case 'l': toggleCatchUp(); break;
+      case 'l': seekToLive(); break;
     }
   });
 }

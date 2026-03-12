@@ -15,7 +15,7 @@ function injectStyles(css) {
 }
 
 function getUsername() {
-  return location.pathname.replace(/^\//, '').split('/')[0].split('?')[0] || '';
+  return location.pathname.replace(/^\//, '').split('/')[0] || '';
 }
 
 function hideNativeControls() {

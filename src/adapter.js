@@ -1,7 +1,7 @@
 import { setState, state } from './state.js';
 import { loadPrefs, KEYS } from './prefs.js';
 
-// IVS event string literals, validated against Kick's embedded IVS 1.49 player
+// IVS event string literals — validated against Kick's embedded IVS 1.49 player
 const EV = {
   STATE_CHANGED:         'PlayerStateChanged',
   QUALITY_CHANGED:       'PlayerQualityChanged',
@@ -19,8 +19,9 @@ const PS = {
 };
 
 let _player = null;
-let _boundPlayer = null;
+let _boundPlayer = null; // guard against duplicate onPlayerReady binding
 let _retryTimer = null;
+let _latencyTimer = null;
 const MAX_RETRIES = 40;
 const RETRY_INTERVAL = 500;
 
@@ -61,6 +62,7 @@ function extractPlayer() {
 }
 
 function walkFiberForPlayer(fiber) {
+  // Require a broader method surface to reduce false positives
   const isPlayer = v =>
     v &&
     typeof v === 'object' &&
@@ -143,11 +145,6 @@ function onPlayerReady() {
     const playing = ps === PS.PLAYING;
 
     if (playing) sessionStorage.removeItem('kt.reloads');
-
-    if (buffering && state.catching) {
-      p.setPlaybackRate(1);
-      setState({ catching: false, rate: 1 });
-    }
 
     setState({ playing, buffering });
   });
@@ -250,6 +247,18 @@ function onPlayerReady() {
       }
     }
   }, 2000);
+
+  // Poll live edge latency every second.
+  // getDuration() = live edge position, getPosition() = current position.
+  // Guard against NaN/Infinity which IVS can return briefly during startup/buffering.
+  clearInterval(_latencyTimer);
+  _latencyTimer = setInterval(() => {
+    try {
+      const latency = p.getLiveLatency?.();
+      if (latency == null || !isFinite(latency)) return;
+      setState({ atLiveEdge: latency <= 5 });
+    } catch (_) {}
+  }, 1000);
 
   console.log('[KickTiny] Adapter ready. IVS player attached.');
 }
