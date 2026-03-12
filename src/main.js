@@ -1,5 +1,5 @@
 import { initAdapter } from './adapter.js';
-import { bindKeys } from './actions.js';
+import { bindKeys, togglePlay, toggleFullscreen } from './actions.js';
 import { setState } from './state.js';
 import { createBar, initBarHover } from './ui/bar.js';
 import { createOverlay } from './ui/overlay.js';
@@ -15,7 +15,7 @@ function injectStyles(css) {
 }
 
 function getUsername() {
-  return location.pathname.replace(/^\//, '').split('?')[0] || '';
+  return location.pathname.replace(/^\//, '').split('/')[0].split('?')[0] || '';
 }
 
 function hideNativeControls() {
@@ -45,7 +45,10 @@ function waitForContainer(maxAttempts = 60) {
   });
 }
 
+let _initialized = false;
 async function init() {
+  if (_initialized) return;
+  _initialized = true;
   try {
     const container = await waitForContainer();
     injectStyles(CSS);
@@ -61,6 +64,21 @@ async function init() {
     root.appendChild(bar);
 
     initBarHover(root, bar, container, topBar);
+
+    let _clickTimer = null;
+    container.addEventListener('click', e => {
+      if (bar.contains(e.target) || topBar.contains(e.target)) return;
+      if (_clickTimer) {
+        clearTimeout(_clickTimer);
+        _clickTimer = null;
+        toggleFullscreen();
+      } else {
+        _clickTimer = setTimeout(() => {
+          _clickTimer = null;
+          togglePlay();
+        }, 250);
+      }
+    });
 
     initAdapter();
     bindKeys();

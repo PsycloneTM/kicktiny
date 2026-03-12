@@ -1,4 +1,3 @@
-import { togglePlay, toggleFullscreen } from '../actions.js';
 import { subscribe } from '../state.js';
 
 export function createOverlay() {
@@ -11,11 +10,9 @@ export function createOverlay() {
       </svg>
     </button>
   `;
-  overlay.querySelector('button').addEventListener('click', togglePlay);
-  overlay.addEventListener('dblclick', toggleFullscreen); // fix: was dynamic import()
 
-  subscribe(({ playing, buffering }) => {
-    overlay.classList.toggle('kt-overlay-hidden', playing || buffering);
+  subscribe(({ alive, playing, buffering }) => {
+    overlay.classList.toggle('kt-overlay-hidden', !alive || playing || buffering);
   });
 
   return overlay;
