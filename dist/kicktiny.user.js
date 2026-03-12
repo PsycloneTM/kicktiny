@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KickTiny
 // @namespace    https://github.com/reda777/kicktiny
-// @version      0.1.2
+// @version      0.1.3
 // @description  Custom player overlay for Kick.com embeds
 // @author       Reda777
 // @match        https://player.kick.com/*
@@ -31,6 +31,7 @@ const state = {
   username: '',
   viewers: null,
   uptime: null,
+  title: null,
   error: null,
 };
 
@@ -87,7 +88,7 @@ function savePrefs(patch) {
 
 // ── adapter.js ──
 
-// IVS event string literals
+// IVS event string literals, validated against Kick's embedded IVS 1.49 player
 const EV = {
   STATE_CHANGED:         'PlayerStateChanged',
   QUALITY_CHANGED:       'PlayerQualityChanged',
@@ -105,14 +106,19 @@ const PS = {
 };
 
 let _player = null;
+let _boundPlayer = null;
 let _retryTimer = null;
 const MAX_RETRIES = 40;
 const RETRY_INTERVAL = 500;
+
+// Empirically, Kick's embedded IVS player gets permanently stuck on worker
+// error codes -2 and -3. A page reload is the only reliable recovery.
 const RECONNECT_CODES = new Set([-2, -3]);
 
 function getPlayer() { return _player; }
 
 function initAdapter() {
+  clearTimeout(_retryTimer);
   tryExtract(0);
 }
 
@@ -142,8 +148,16 @@ function extractPlayer() {
 }
 
 function walkFiberForPlayer(fiber) {
-  const isPlayer = v => v && typeof v === 'object' && typeof v.getState === 'function'
-    && typeof v.getQualities === 'function';
+  const isPlayer = v =>
+    v &&
+    typeof v === 'object' &&
+    typeof v.getState === 'function' &&
+    typeof v.getQualities === 'function' &&
+    typeof v.getQuality === 'function' &&
+    typeof v.setQuality === 'function' &&
+    typeof v.getVolume === 'function' &&
+    typeof v.setVolume === 'function' &&
+    typeof v.addEventListener === 'function';
 
   const seen = new Set();
 
@@ -182,6 +196,9 @@ function walkFiberForPlayer(fiber) {
 
 function onPlayerReady() {
   const p = _player;
+  // Guard against duplicate binding if extraction somehow runs twice
+  if (!p || _boundPlayer === p) return;
+  _boundPlayer = p;
 
   // Load saved prefs before reading player state
   const prefs = loadPrefs();
@@ -212,7 +229,8 @@ function onPlayerReady() {
     const buffering = ps === PS.BUFFERING;
     const playing = ps === PS.PLAYING;
 
-    // If catching up and we hit buffering, we've reached live edge — reset
+    if (playing) sessionStorage.removeItem('kt.reloads');
+
     if (buffering && state.catching) {
       p.setPlaybackRate(1);
       setState({ catching: false, rate: 1 });
@@ -222,6 +240,9 @@ function onPlayerReady() {
   });
 
   let _reapplying = false;
+  let _reapplyAttempts = 0;
+  const MAX_REAPPLY = 3;
+
   p.addEventListener(EV.QUALITY_CHANGED, e => {
     const q = e?.name ? e : (e?.quality ?? null);
     const qs = p.getQualities();
@@ -234,20 +255,27 @@ function onPlayerReady() {
 
     const savedName = localStorage.getItem(KEYS.quality);
 
-    // If IVS silently reset our quality, re-apply pref
-    // Don't update UI state with the wrong quality
     if (!state.autoQuality && savedName && q?.name !== savedName) {
+      if (_reapplyAttempts >= MAX_REAPPLY) {
+        // IVS is refusing the quality — accept what it gives us and reset
+        _reapplying = false;
+        _reapplyAttempts = 0;
+        setState({ quality: q });
+        return;
+      }
       if (!_reapplying) {
         const all = qs || state.qualities;
         const match = all.find(x => x.name === savedName)
           || all.find(x => x.name.replace(/\d+$/, '') === savedName.replace(/\d+$/, ''));
         if (match) {
           _reapplying = true;
+          _reapplyAttempts++;
           p.setAutoQualityMode(false);
           p.setQuality(match);
         } else {
-          // Saved quality no longer available, accept whatever IVS gives us
+          // Saved quality no longer in stream — accept whatever IVS gives us
           _reapplying = false;
+          _reapplyAttempts = 0;
           setState({ quality: q });
         }
       }
@@ -255,6 +283,7 @@ function onPlayerReady() {
     }
 
     _reapplying = false;
+    _reapplyAttempts = 0;
     setState({ quality: q });
   });
 
@@ -281,7 +310,15 @@ function onPlayerReady() {
   p.addEventListener(EV.RECOVERABLE_ERROR, err => {
     const code = err?.code ?? null;
     if (RECONNECT_CODES.has(code)) {
-      console.warn('[KickTiny] IVS fatal worker error, reloading...');
+      const key = 'kt.reloads';
+      const count = Number(sessionStorage.getItem(key) || 0);
+      if (count >= 3) {
+        console.error('[KickTiny] Too many reload attempts, giving up.');
+        sessionStorage.removeItem(key);
+        return;
+      }
+      sessionStorage.setItem(key, String(count + 1));
+      console.warn('[KickTiny] IVS fatal worker error, reloading... (attempt', count + 1, 'of 3)');
       setTimeout(() => window.location.reload(), 2000);
     }
   });
@@ -290,7 +327,7 @@ function onPlayerReady() {
     setState({ fullscreen: !!document.fullscreenElement });
   });
 
-  //retry quality pref if qualities were empty at init
+  // Retry quality pref if qualities were empty at init
   setTimeout(() => {
     const qs = p.getQualities();
     if (qs && qs.length) {
@@ -315,12 +352,11 @@ function applyQualityPref(p, savedName) {
   if (match) {
     p.setAutoQualityMode(false);
     p.setQuality(match);
-    setState({ autoQuality: false, quality: match }); // keep state in sync
+    setState({ autoQuality: false, quality: match });
     return true;
   }
   return false;
 }
-
 
 // ── actions.js ──
 
@@ -404,13 +440,16 @@ function toggleFullscreen() {
     || document.querySelector('div[class*="aspect-video"]')
     || document.body;
   if (!document.fullscreenElement) {
-    container.requestFullscreen?.();
+    container.requestFullscreen?.()?.catch(() => {});
   } else {
     document.exitFullscreen?.();
   }
 }
 
+let _keysBound = false;
 function bindKeys() {
+  if (_keysBound) return;
+  _keysBound = true;
   document.addEventListener('keydown', e => {
     if (['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName)) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -473,12 +512,23 @@ function createVolumeCtrl() {
   slider.max = 100;
   slider.step = 1;
 
+  // Clip wrapper animates max-width for show/hide — slider stays at constant
+  // 70px so the browser always has a real track for thumb position calculation.
+  const clip = document.createElement('div');
+  clip.className = 'kt-vol-clip';
+  clip.appendChild(slider);
+
   let _dragging = false;
-  slider.addEventListener('mousedown', () => { _dragging = true; });
-  slider.addEventListener('mouseup',   () => { _dragging = false; });
+  slider.addEventListener('mousedown', () => {
+    _dragging = true;
+    const up = () => { _dragging = false; document.removeEventListener('mouseup', up); };
+    document.addEventListener('mouseup', up);
+  });
+  slider.addEventListener('touchstart', () => { _dragging = true; }, { passive: true });
+  slider.addEventListener('touchend',   () => { _dragging = false; }, { passive: true });
   slider.addEventListener('input', () => setVolume(Number(slider.value)));
 
-  wrap.append(btn, slider);
+  wrap.append(btn, clip);
 
   subscribe(({ volume, muted }) => {
     btn.innerHTML = svgVol(muted || volume === 0);
@@ -521,11 +571,23 @@ function openPopup(popup, triggerBtn) {
   popup.hidden = false;
   popup.style.visibility = 'hidden';
   const rect = triggerBtn.getBoundingClientRect();
-  const popupWidth = popup.offsetWidth || 120;
-  let left = rect.right - popupWidth;
+  const vw = window.innerWidth;
+  const popupW = popup.offsetWidth || 120;
+  const popupH = popup.offsetHeight || 100;
+
+  const availableH = rect.top - 8 - 4;
+  const maxH = Math.max(80, availableH);
+  popup.style.maxHeight = maxH + 'px';
+
+  let top = rect.top - Math.min(popupH, maxH) - 8;
+  if (top < 4) top = 4;
+
+  let left = rect.right - popupW;
   if (left < 4) left = 4;
+  if (left + popupW > vw - 4) left = vw - popupW - 4;
+
   popup.style.left = left + 'px';
-  popup.style.top = (rect.top - popup.offsetHeight - 8) + 'px';
+  popup.style.top = top + 'px';
   popup.style.visibility = '';
 }
 
@@ -720,13 +782,15 @@ async function fetchChannelInfo(username) {
 async function fetchViewers(username) {
   try {
     const data = await fetchChannelInfo(username);
+    const ls = data?.livestream ?? null;
     return {
-      viewers: data?.livestream?.viewer_count ?? null,
-      startTime: data?.livestream?.start_time ?? null,
-      title: data?.livestream?.session_title ?? null,
+      isLive: ls !== null,
+      viewers: ls?.viewer_count ?? null,
+      startTime: ls?.start_time ?? null,
+      title: ls?.session_title ?? null,
     };
   } catch {
-    return { viewers: null, startTime: null, title: null };
+    return { isLive: null, viewers: null, startTime: null, title: null };
   }
 }
 
@@ -756,10 +820,15 @@ function createInfo() {
   async function poll() {
     if (!state.username) return;
     const data = await fetchViewers(state.username);
-    const online = data.viewers !== null || data.startTime !== null;
-    live.textContent = online ? '● LIVE' : '● OFFLINE';
-    live.classList.toggle('kt-offline', !online);
-    if (!online) {
+
+    if (data.isLive === null) return;
+
+    if (data.title !== null) setState({ title: data.title });
+
+    live.textContent = data.isLive ? '● LIVE' : '● OFFLINE';
+    live.classList.toggle('kt-offline', !data.isLive);
+
+    if (!data.isLive) {
       viewers.textContent = '';
       uptime.textContent = '';
       clearInterval(uptimeTimer);
@@ -767,10 +836,10 @@ function createInfo() {
       startDate = null;
       return;
     }
+
     if (data.viewers !== null) viewers.textContent = fmtViewers(data.viewers) + ' watching';
     if (data.startTime) {
       const newStart = new Date(data.startTime);
-      // Restart uptime if stream is new or restarted
       if (!startDate || newStart.getTime() !== startDate.getTime()) {
         startDate = newStart;
         clearInterval(uptimeTimer);
@@ -780,9 +849,21 @@ function createInfo() {
     }
   }
 
-  subscribe(({ alive, username, playing }) => {
-    live.style.opacity = playing ? '1' : '0.5';
-    if (alive && username && !pollTimer) {
+  subscribe(({ username, playing }) => {
+    live.style.opacity = playing ? '1' : '0.6';
+    if (username && !pollTimer) {
+      poll();
+      pollTimer = setInterval(poll, 30_000);
+    }
+  });
+
+  // Pause polling when tab is hidden, resume when visible
+  document.addEventListener('visibilitychange', () => {
+    if (!state.username) return;
+    if (document.hidden) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    } else {
       poll();
       pollTimer = setInterval(poll, 30_000);
     }
@@ -827,7 +908,11 @@ function initBarHover(root, bar, container, topBar) {
     }, 3000);
   };
 
-  container.addEventListener('mousemove', show);
+  let _moveRaf = 0;
+  container.addEventListener('mousemove', () => {
+    if (_moveRaf) return;
+    _moveRaf = requestAnimationFrame(() => { show(); _moveRaf = 0; });
+  });
 
   container.addEventListener('mouseleave', () => {
     clearTimeout(hideTimer);
@@ -841,7 +926,16 @@ function initBarHover(root, bar, container, topBar) {
   bar.addEventListener('mouseenter', () => {
     clearTimeout(hideTimer);
     bar.classList.add('kt-bar-visible');
+    if (topBar) topBar.classList.add('kt-top-bar-visible');
   });
+
+  if (topBar) {
+    topBar.addEventListener('mouseenter', () => {
+      clearTimeout(hideTimer);
+      topBar.classList.add('kt-top-bar-visible');
+      bar.classList.add('kt-bar-visible');
+    });
+  }
 
   subscribe(({ playing }) => {
     if (!playing) {
@@ -868,11 +962,9 @@ function createOverlay() {
       </svg>
     </button>
   `;
-  overlay.querySelector('button').addEventListener('click', togglePlay);
-  overlay.addEventListener('dblclick', toggleFullscreen); // fix: was dynamic import()
 
-  subscribe(({ playing, buffering }) => {
-    overlay.classList.toggle('kt-overlay-hidden', playing || buffering);
+  subscribe(({ alive, playing, buffering }) => {
+    overlay.classList.toggle('kt-overlay-hidden', !alive || playing || buffering);
   });
 
   return overlay;
@@ -893,24 +985,21 @@ function createTopBar() {
   const title = document.createElement('div');
   title.className = 'kt-stream-title';
 
-  bar.append(channelLink, title);
+  const channelWrap = document.createElement('div');
+  channelWrap.appendChild(channelLink);
 
-  subscribe(({ username }) => {
-    if (!username) return;
-    channelLink.href = `https://www.kick.com/${username}`;
-    channelLink.textContent = username;
-  });
+  bar.append(channelWrap, title);
 
-  async function fetchTitle() {
-    if (!state.username) return;
-    try {
-      const data = await fetchViewers(state.username);
-      if (data.title) title.textContent = data.title;
-    } catch (_) {}
-  }
-
-  subscribe(({ alive, username }) => {
-    if (alive && username) fetchTitle();
+  let _ready = false;
+  subscribe(({ username, title: stateTitle }) => {
+    if (username && !_ready) {
+      _ready = true;
+      channelLink.href = `https://www.kick.com/${username}`;
+      channelLink.textContent = username.charAt(0).toUpperCase() + username.slice(1);
+    }
+    if (stateTitle && stateTitle !== title.textContent) {
+      title.textContent = stateTitle;
+    }
   });
 
   return bar;
@@ -919,7 +1008,7 @@ function createTopBar() {
 
 // ── main.js ──
 
-const CSS = `:root{--kt-black:#0d0d0d;--kt-white:#f0f0f0;--kt-green:#53fc18;--kt-dim:rgba(255,255,255,0.55);--kt-bar-h:48px;--kt-radius:5px;--kt-font:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;--kt-size:13px;--kt-trans:0.2s ease}#kt-root{position:absolute;inset:0;z-index:9999;pointer-events:none;font-family:var(--kt-font);font-size:var(--kt-size);color:var(--kt-white);user-select:none;-webkit-user-select:none}#kt-root.kt-idle{cursor:none}.kt-top-bar{position:absolute;top:0;left:0;right:0;padding:10px 14px;display:flex;flex-direction:column;gap:2px;background:linear-gradient(to bottom,rgba(0,0,0,0.75) 0%,transparent 100%);pointer-events:all;opacity:0;transition:opacity var(--kt-trans)}.kt-top-bar-visible{opacity:1}.kt-channel-link{font-size:13px;font-weight:700;color:var(--kt-white);text-decoration:none;line-height:1.2}.kt-channel-link:hover{color:var(--kt-green)}.kt-stream-title{font-size:12px;color:var(--kt-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.3}.kt-bar{position:absolute;bottom:0;left:0;right:0;height:var(--kt-bar-h);display:flex;align-items:center;justify-content:space-between;padding:0 10px;gap:6px;background:linear-gradient(to top,rgba(0,0,0,0.75) 0%,transparent 100%);pointer-events:all;opacity:0;transition:opacity var(--kt-trans);overflow:visible}.kt-bar-visible{opacity:1}.kt-bar-left,.kt-bar-right{display:flex;align-items:center;gap:4px;overflow:visible}.kt-btn{background:none;border:none;padding:6px;cursor:pointer;color:var(--kt-white);display:flex;align-items:center;justify-content:center;border-radius:var(--kt-radius);transition:color var(--kt-trans),background var(--kt-trans);line-height:0}.kt-btn:hover{color:var(--kt-green);background:rgba(255,255,255,0.08)}.kt-btn svg{width:20px;height:20px}@keyframes kt-spin{to{transform:rotate(360deg)}}.kt-spin{animation:kt-spin 0.8s linear infinite}.kt-vol-wrap{display:flex;align-items:center;gap:4px}.kt-vol-slider{-webkit-appearance:none;appearance:none;width:0;max-width:0;height:3px;border-radius:2px;background:rgba(255,255,255,0.3);outline:none;cursor:pointer;transition:width var(--kt-trans),max-width var(--kt-trans),opacity var(--kt-trans);opacity:0;pointer-events:none}.kt-vol-wrap:hover .kt-vol-slider,.kt-vol-slider:focus{width:70px;max-width:70px;opacity:1;pointer-events:all}.kt-vol-slider::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;border-radius:50%;background:var(--kt-green);cursor:pointer}.kt-vol-slider::-moz-range-thumb{width:12px;height:12px;border-radius:50%;background:var(--kt-green);cursor:pointer;border:none}.kt-info{display:flex;align-items:center;gap:6px;padding:0 4px}.kt-live-badge{background:#eb0400;color:#fff;font-size:10px;font-weight:700;letter-spacing:0.05em;padding:2px 5px;border-radius:3px;line-height:1;transition:opacity var(--kt-trans)}.kt-live-badge.kt-offline{background:#555}.kt-viewers,.kt-uptime{color:var(--kt-dim);font-size:12px;white-space:nowrap}.kt-popup-wrap{position:relative}.kt-popup{position:fixed;min-width:120px;background:rgba(18,18,18,0.97);border:1px solid rgba(255,255,255,0.12);border-radius:10px;padding:6px;z-index:99999;backdrop-filter:blur(12px);box-shadow:0 8px 24px rgba(0,0,0,0.6);font-family:var(--kt-font)}.kt-popup[hidden]{display:none}.kt-popup-item{display:block;width:100%;padding:7px 12px;text-align:left;background:none;border:none;color:#f0f0f0;font-size:13px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;cursor:pointer;white-space:nowrap;border-radius:6px;transition:color 0.2s ease,background 0.2s ease}.kt-popup-item:hover{color:#f0f0f0;background:rgba(255,255,255,0.1)}.kt-popup-item.kt-active{color:#53fc18}.kt-qual-btn,.kt-speed-btn{font-size:12px;font-weight:600;padding:6px 8px;letter-spacing:0.02em}.kt-catchup-item{border-top:1px solid rgba(255,255,255,0.08);margin-top:4px;padding-top:11px;color:#53fc18 !important}.kt-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:all;transition:opacity var(--kt-trans)}.kt-overlay-hidden{opacity:0;pointer-events:none}.kt-overlay-btn{background:rgba(0,0,0,0.5);border:none;border-radius:50%;width:60px;height:60px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--kt-white);transition:transform var(--kt-trans),background var(--kt-trans)}.kt-overlay-btn:hover{transform:scale(1.1);background:rgba(83,252,24,0.25);color:var(--kt-green)}.kt-overlay-btn svg{width:32px;height:32px}`;
+const CSS = `:root{--kt-black:#0d0d0d;--kt-white:#f0f0f0;--kt-green:#53fc18;--kt-dim:rgba(255,255,255,0.55);--kt-bar-h:48px;--kt-radius:5px;--kt-font:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;--kt-size:13px;--kt-trans:0.2s ease}#kt-root{position:absolute;inset:0;z-index:9999;pointer-events:none;font-family:var(--kt-font);font-size:var(--kt-size);color:var(--kt-white);user-select:none;-webkit-user-select:none}#kt-root.kt-idle{cursor:none}.kt-top-bar{position:absolute;top:0;left:0;right:0;padding:10px 14px;display:flex;flex-direction:column;gap:2px;background:linear-gradient(to bottom,rgba(0,0,0,0.85) 0%,rgba(0,0,0,0.5) 60%,transparent 100%);opacity:0;transition:opacity var(--kt-trans)}.kt-top-bar-visible{opacity:1}.kt-channel-link{font-size:15px;font-weight:700;color:var(--kt-white);text-decoration:none;line-height:1.2;pointer-events:auto}.kt-channel-link:hover{color:var(--kt-green)}.kt-stream-title{font-size:13px;color:var(--kt-white);white-space:nowrap;overflow-x:hidden;text-overflow:ellipsis;line-height:1.3}.kt-bar{position:absolute;bottom:0;left:0;right:0;height:var(--kt-bar-h);display:flex;align-items:center;justify-content:space-between;padding:0 10px;gap:6px;background:linear-gradient(to top,rgba(0,0,0,0.75) 0%,transparent 100%);pointer-events:all;opacity:0;transition:opacity var(--kt-trans);overflow:visible}.kt-bar-visible{opacity:1}.kt-bar-left,.kt-bar-right{display:flex;align-items:center;gap:4px;overflow:visible}.kt-btn{background:none;border:none;padding:6px;cursor:pointer;color:var(--kt-white);display:flex;align-items:center;justify-content:center;border-radius:var(--kt-radius);transition:color var(--kt-trans),background var(--kt-trans);line-height:0}.kt-btn:hover{color:var(--kt-green);background:rgba(255,255,255,0.08)}.kt-btn svg{width:20px;height:20px}@keyframes kt-spin{to{transform:rotate(360deg)}}.kt-spin{animation:kt-spin 0.8s linear infinite}.kt-vol-wrap{display:flex;align-items:center;gap:4px}.kt-vol-clip{overflow:hidden;max-width:0;transition:max-width var(--kt-trans)}.kt-vol-wrap:hover .kt-vol-clip,.kt-vol-clip:focus-within{max-width:74px}.kt-vol-slider{-webkit-appearance:none;appearance:none;width:70px;flex-shrink:0;margin-left:4px;height:3px;border-radius:2px;background:rgba(255,255,255,0.3);outline:none;cursor:pointer}.kt-vol-slider::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;border-radius:50%;background:var(--kt-green);cursor:pointer}.kt-vol-slider::-moz-range-thumb{width:12px;height:12px;border-radius:50%;background:var(--kt-green);cursor:pointer;border:none}.kt-info{display:flex;align-items:center;gap:6px;padding:0 4px}.kt-live-badge{background:#eb0400;color:#fff;font-size:10px;font-weight:700;letter-spacing:0.05em;padding:2px 5px;border-radius:3px;line-height:1;transition:opacity var(--kt-trans)}.kt-live-badge.kt-offline{background:#555}.kt-viewers,.kt-uptime{color:var(--kt-dim);font-size:12px;white-space:nowrap}.kt-popup-wrap{position:relative}.kt-popup{position:fixed;min-width:120px;overflow-y:auto;background:rgba(18,18,18,0.97);border:1px solid rgba(255,255,255,0.12);border-radius:10px;padding:6px;z-index:99999;backdrop-filter:blur(12px);box-shadow:0 8px 24px rgba(0,0,0,0.6);font-family:var(--kt-font)}.kt-popup[hidden]{display:none}.kt-popup-item{display:block;width:100%;padding:7px 12px;text-align:left;background:none;border:none;color:var(--kt-white);font-size:var(--kt-size);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;cursor:pointer;white-space:nowrap;border-radius:6px;transition:color 0.2s ease,background 0.2s ease}.kt-popup-item:hover{color:var(--kt-white);background:rgba(255,255,255,0.1)}.kt-popup-item.kt-active{color:var(--kt-green)}.kt-qual-btn,.kt-speed-btn{font-size:12px;font-weight:600;padding:6px 8px;letter-spacing:0.02em}.kt-catchup-item{border-top:1px solid rgba(255,255,255,0.08);margin-top:4px;padding-top:11px;color:var(--kt-green) !important}.kt-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:all;transition:opacity var(--kt-trans)}.kt-overlay-hidden{opacity:0;pointer-events:none}.kt-overlay-btn{background:rgba(0,0,0,0.5);border:none;border-radius:50%;width:60px;height:60px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--kt-white);transition:transform var(--kt-trans),background var(--kt-trans)}.kt-overlay-btn:hover{transform:scale(1.1);background:rgba(83,252,24,0.25);color:var(--kt-green)}.kt-overlay-btn svg{width:32px;height:32px}`;
 
 function injectStyles(css) {
   const style = document.createElement('style');
@@ -929,7 +1018,7 @@ function injectStyles(css) {
 }
 
 function getUsername() {
-  return location.pathname.replace(/^\//, '').split('?')[0] || '';
+  return location.pathname.replace(/^\//, '').split('/')[0].split('?')[0] || '';
 }
 
 function hideNativeControls() {
@@ -959,7 +1048,10 @@ function waitForContainer(maxAttempts = 60) {
   });
 }
 
+let _initialized = false;
 async function init() {
+  if (_initialized) return;
+  _initialized = true;
   try {
     const container = await waitForContainer();
     injectStyles(CSS);
@@ -975,6 +1067,21 @@ async function init() {
     root.appendChild(bar);
 
     initBarHover(root, bar, container, topBar);
+
+    let _clickTimer = null;
+    container.addEventListener('click', e => {
+      if (bar.contains(e.target) || topBar.contains(e.target)) return;
+      if (_clickTimer) {
+        clearTimeout(_clickTimer);
+        _clickTimer = null;
+        toggleFullscreen();
+      } else {
+        _clickTimer = setTimeout(() => {
+          _clickTimer = null;
+          togglePlay();
+        }, 250);
+      }
+    });
 
     initAdapter();
     bindKeys();
