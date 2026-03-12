@@ -225,7 +225,6 @@
   border-radius: 10px;
   padding: 6px;
   z-index: 99999;
-  backdrop-filter: blur(12px);
   box-shadow: 0 8px 24px rgba(0,0,0,0.6);
   font-family: var(--kt-font);
 }
