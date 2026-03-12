@@ -39,7 +39,11 @@ export function initBarHover(root, bar, container, topBar) {
     }, 3000);
   };
 
-  container.addEventListener('mousemove', show);
+  let _moveRaf = 0;
+  container.addEventListener('mousemove', () => {
+    if (_moveRaf) return;
+    _moveRaf = requestAnimationFrame(() => { show(); _moveRaf = 0; });
+  });
 
   container.addEventListener('mouseleave', () => {
     clearTimeout(hideTimer);
@@ -53,7 +57,16 @@ export function initBarHover(root, bar, container, topBar) {
   bar.addEventListener('mouseenter', () => {
     clearTimeout(hideTimer);
     bar.classList.add('kt-bar-visible');
+    if (topBar) topBar.classList.add('kt-top-bar-visible');
   });
+
+  if (topBar) {
+    topBar.addEventListener('mouseenter', () => {
+      clearTimeout(hideTimer);
+      topBar.classList.add('kt-top-bar-visible');
+      bar.classList.add('kt-bar-visible');
+    });
+  }
 
   subscribe(({ playing }) => {
     if (!playing) {
