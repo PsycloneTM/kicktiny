@@ -1,5 +1,4 @@
-import { subscribe, state } from '../state.js';
-import { fetchViewers } from '../api.js';
+import { subscribe } from '../state.js';
 
 export function createTopBar() {
   const bar = document.createElement('div');
@@ -13,24 +12,21 @@ export function createTopBar() {
   const title = document.createElement('div');
   title.className = 'kt-stream-title';
 
-  bar.append(channelLink, title);
+  const channelWrap = document.createElement('div');
+  channelWrap.appendChild(channelLink);
 
-  subscribe(({ username }) => {
-    if (!username) return;
-    channelLink.href = `https://www.kick.com/${username}`;
-    channelLink.textContent = username;
-  });
+  bar.append(channelWrap, title);
 
-  async function fetchTitle() {
-    if (!state.username) return;
-    try {
-      const data = await fetchViewers(state.username);
-      if (data.title) title.textContent = data.title;
-    } catch (_) {}
-  }
-
-  subscribe(({ alive, username }) => {
-    if (alive && username) fetchTitle();
+  let _ready = false;
+  subscribe(({ username, title: stateTitle }) => {
+    if (username && !_ready) {
+      _ready = true;
+      channelLink.href = `https://www.kick.com/${username}`;
+      channelLink.textContent = username.charAt(0).toUpperCase() + username.slice(1);
+    }
+    if (stateTitle && stateTitle !== title.textContent) {
+      title.textContent = stateTitle;
+    }
   });
 
   return bar;

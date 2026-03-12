@@ -13,6 +13,7 @@ export const state = {
   username: '',
   viewers: null,
   uptime: null,
+  title: null,
   error: null,
 };
 
