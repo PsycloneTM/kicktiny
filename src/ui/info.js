@@ -1,4 +1,4 @@
-import { subscribe, state } from '../state.js';
+import { subscribe, state, setState } from '../state.js';
 import { fmtViewers, fmtUptime } from '../utils/format.js';
 import { fetchViewers } from '../api.js';
 
@@ -25,10 +25,15 @@ export function createInfo() {
   async function poll() {
     if (!state.username) return;
     const data = await fetchViewers(state.username);
-    const online = data.viewers !== null || data.startTime !== null;
-    live.textContent = online ? '● LIVE' : '● OFFLINE';
-    live.classList.toggle('kt-offline', !online);
-    if (!online) {
+
+    if (data.isLive === null) return;
+
+    if (data.title !== null) setState({ title: data.title });
+
+    live.textContent = data.isLive ? '● LIVE' : '● OFFLINE';
+    live.classList.toggle('kt-offline', !data.isLive);
+
+    if (!data.isLive) {
       viewers.textContent = '';
       uptime.textContent = '';
       clearInterval(uptimeTimer);
@@ -36,10 +41,10 @@ export function createInfo() {
       startDate = null;
       return;
     }
+
     if (data.viewers !== null) viewers.textContent = fmtViewers(data.viewers) + ' watching';
     if (data.startTime) {
       const newStart = new Date(data.startTime);
-      // Restart uptime if stream is new or restarted
       if (!startDate || newStart.getTime() !== startDate.getTime()) {
         startDate = newStart;
         clearInterval(uptimeTimer);
@@ -49,9 +54,21 @@ export function createInfo() {
     }
   }
 
-  subscribe(({ alive, username, playing }) => {
-    live.style.opacity = playing ? '1' : '0.5';
-    if (alive && username && !pollTimer) {
+  subscribe(({ username, playing }) => {
+    live.style.opacity = playing ? '1' : '0.6';
+    if (username && !pollTimer) {
+      poll();
+      pollTimer = setInterval(poll, 30_000);
+    }
+  });
+
+  // Pause polling when tab is hidden, resume when visible
+  document.addEventListener('visibilitychange', () => {
+    if (!state.username) return;
+    if (document.hidden) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    } else {
       poll();
       pollTimer = setInterval(poll, 30_000);
     }
