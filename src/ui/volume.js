@@ -17,12 +17,23 @@ export function createVolumeCtrl() {
   slider.max = 100;
   slider.step = 1;
 
+  // Clip wrapper animates max-width for show/hide — slider stays at constant
+  // 70px so the browser always has a real track for thumb position calculation.
+  const clip = document.createElement('div');
+  clip.className = 'kt-vol-clip';
+  clip.appendChild(slider);
+
   let _dragging = false;
-  slider.addEventListener('mousedown', () => { _dragging = true; });
-  slider.addEventListener('mouseup',   () => { _dragging = false; });
+  slider.addEventListener('mousedown', () => {
+    _dragging = true;
+    const up = () => { _dragging = false; document.removeEventListener('mouseup', up); };
+    document.addEventListener('mouseup', up);
+  });
+  slider.addEventListener('touchstart', () => { _dragging = true; }, { passive: true });
+  slider.addEventListener('touchend',   () => { _dragging = false; }, { passive: true });
   slider.addEventListener('input', () => setVolume(Number(slider.value)));
 
-  wrap.append(btn, slider);
+  wrap.append(btn, clip);
 
   subscribe(({ volume, muted }) => {
     btn.innerHTML = svgVol(muted || volume === 0);
