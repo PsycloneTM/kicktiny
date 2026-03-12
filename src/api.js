@@ -16,12 +16,14 @@ export async function fetchChannelInfo(username) {
 export async function fetchViewers(username) {
   try {
     const data = await fetchChannelInfo(username);
+    const ls = data?.livestream ?? null;
     return {
-      viewers: data?.livestream?.viewer_count ?? null,
-      startTime: data?.livestream?.start_time ?? null,
-      title: data?.livestream?.session_title ?? null,
+      isLive: ls !== null,
+      viewers: ls?.viewer_count ?? null,
+      startTime: ls?.start_time ?? null,
+      title: ls?.session_title ?? null,
     };
   } catch {
-    return { viewers: null, startTime: null, title: null };
+    return { isLive: null, viewers: null, startTime: null, title: null };
   }
 }

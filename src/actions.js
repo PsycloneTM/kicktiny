@@ -82,13 +82,16 @@ export function toggleFullscreen() {
     || document.querySelector('div[class*="aspect-video"]')
     || document.body;
   if (!document.fullscreenElement) {
-    container.requestFullscreen?.();
+    container.requestFullscreen?.()?.catch(() => {});
   } else {
     document.exitFullscreen?.();
   }
 }
 
+let _keysBound = false;
 export function bindKeys() {
+  if (_keysBound) return;
+  _keysBound = true;
   document.addEventListener('keydown', e => {
     if (['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName)) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;

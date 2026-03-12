@@ -1,7 +1,7 @@
 import { setState, state } from './state.js';
 import { loadPrefs, KEYS } from './prefs.js';
 
-// IVS event string literals
+// IVS event string literals, validated against Kick's embedded IVS 1.49 player
 const EV = {
   STATE_CHANGED:         'PlayerStateChanged',
   QUALITY_CHANGED:       'PlayerQualityChanged',
@@ -19,14 +19,19 @@ const PS = {
 };
 
 let _player = null;
+let _boundPlayer = null;
 let _retryTimer = null;
 const MAX_RETRIES = 40;
 const RETRY_INTERVAL = 500;
+
+// Empirically, Kick's embedded IVS player gets permanently stuck on worker
+// error codes -2 and -3. A page reload is the only reliable recovery.
 const RECONNECT_CODES = new Set([-2, -3]);
 
 export function getPlayer() { return _player; }
 
 export function initAdapter() {
+  clearTimeout(_retryTimer);
   tryExtract(0);
 }
 
@@ -56,8 +61,16 @@ function extractPlayer() {
 }
 
 function walkFiberForPlayer(fiber) {
-  const isPlayer = v => v && typeof v === 'object' && typeof v.getState === 'function'
-    && typeof v.getQualities === 'function';
+  const isPlayer = v =>
+    v &&
+    typeof v === 'object' &&
+    typeof v.getState === 'function' &&
+    typeof v.getQualities === 'function' &&
+    typeof v.getQuality === 'function' &&
+    typeof v.setQuality === 'function' &&
+    typeof v.getVolume === 'function' &&
+    typeof v.setVolume === 'function' &&
+    typeof v.addEventListener === 'function';
 
   const seen = new Set();
 
@@ -96,6 +109,9 @@ function walkFiberForPlayer(fiber) {
 
 function onPlayerReady() {
   const p = _player;
+  // Guard against duplicate binding if extraction somehow runs twice
+  if (!p || _boundPlayer === p) return;
+  _boundPlayer = p;
 
   // Load saved prefs before reading player state
   const prefs = loadPrefs();
@@ -126,7 +142,8 @@ function onPlayerReady() {
     const buffering = ps === PS.BUFFERING;
     const playing = ps === PS.PLAYING;
 
-    // If catching up and we hit buffering, we've reached live edge — reset
+    if (playing) sessionStorage.removeItem('kt.reloads');
+
     if (buffering && state.catching) {
       p.setPlaybackRate(1);
       setState({ catching: false, rate: 1 });
@@ -136,6 +153,9 @@ function onPlayerReady() {
   });
 
   let _reapplying = false;
+  let _reapplyAttempts = 0;
+  const MAX_REAPPLY = 3;
+
   p.addEventListener(EV.QUALITY_CHANGED, e => {
     const q = e?.name ? e : (e?.quality ?? null);
     const qs = p.getQualities();
@@ -148,20 +168,27 @@ function onPlayerReady() {
 
     const savedName = localStorage.getItem(KEYS.quality);
 
-    // If IVS silently reset our quality, re-apply pref
-    // Don't update UI state with the wrong quality
     if (!state.autoQuality && savedName && q?.name !== savedName) {
+      if (_reapplyAttempts >= MAX_REAPPLY) {
+        // IVS is refusing the quality — accept what it gives us and reset
+        _reapplying = false;
+        _reapplyAttempts = 0;
+        setState({ quality: q });
+        return;
+      }
       if (!_reapplying) {
         const all = qs || state.qualities;
         const match = all.find(x => x.name === savedName)
           || all.find(x => x.name.replace(/\d+$/, '') === savedName.replace(/\d+$/, ''));
         if (match) {
           _reapplying = true;
+          _reapplyAttempts++;
           p.setAutoQualityMode(false);
           p.setQuality(match);
         } else {
-          // Saved quality no longer available, accept whatever IVS gives us
+          // Saved quality no longer in stream — accept whatever IVS gives us
           _reapplying = false;
+          _reapplyAttempts = 0;
           setState({ quality: q });
         }
       }
@@ -169,6 +196,7 @@ function onPlayerReady() {
     }
 
     _reapplying = false;
+    _reapplyAttempts = 0;
     setState({ quality: q });
   });
 
@@ -195,7 +223,15 @@ function onPlayerReady() {
   p.addEventListener(EV.RECOVERABLE_ERROR, err => {
     const code = err?.code ?? null;
     if (RECONNECT_CODES.has(code)) {
-      console.warn('[KickTiny] IVS fatal worker error, reloading...');
+      const key = 'kt.reloads';
+      const count = Number(sessionStorage.getItem(key) || 0);
+      if (count >= 3) {
+        console.error('[KickTiny] Too many reload attempts, giving up.');
+        sessionStorage.removeItem(key);
+        return;
+      }
+      sessionStorage.setItem(key, String(count + 1));
+      console.warn('[KickTiny] IVS fatal worker error, reloading... (attempt', count + 1, 'of 3)');
       setTimeout(() => window.location.reload(), 2000);
     }
   });
@@ -204,7 +240,7 @@ function onPlayerReady() {
     setState({ fullscreen: !!document.fullscreenElement });
   });
 
-  //retry quality pref if qualities were empty at init
+  // Retry quality pref if qualities were empty at init
   setTimeout(() => {
     const qs = p.getQualities();
     if (qs && qs.length) {
@@ -229,7 +265,7 @@ function applyQualityPref(p, savedName) {
   if (match) {
     p.setAutoQualityMode(false);
     p.setQuality(match);
-    setState({ autoQuality: false, quality: match }); // keep state in sync
+    setState({ autoQuality: false, quality: match });
     return true;
   }
   return false;
