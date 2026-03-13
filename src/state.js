@@ -11,6 +11,7 @@ export const state = {
   rate: 1,
   atLiveEdge: true,
   username: '',
+  displayName: '',
   viewers: null,
   uptime: null,
   title: null,

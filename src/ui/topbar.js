@@ -18,11 +18,13 @@ export function createTopBar() {
   bar.append(channelWrap, title);
 
   let _ready = false;
-  subscribe(({ username, title: stateTitle }) => {
+  subscribe(({ username, displayName, title: stateTitle }) => {
     if (username && !_ready) {
       _ready = true;
       channelLink.href = `https://www.kick.com/${username}`;
-      channelLink.textContent = username.charAt(0).toUpperCase() + username.slice(1);
+    }
+    if (displayName && channelLink.textContent !== displayName) {
+      channelLink.textContent = displayName;
     }
     if (stateTitle && stateTitle !== title.textContent) {
       title.textContent = stateTitle;

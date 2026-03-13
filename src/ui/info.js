@@ -1,6 +1,6 @@
 import { subscribe, state, setState } from '../state.js';
 import { fmtViewers, fmtUptime } from '../utils/format.js';
-import { fetchViewers } from '../api.js';
+import { fetchChannelInit, fetchViewerCount } from '../api.js';
 import { seekToLive } from '../actions.js';
 
 export function createInfo() {
@@ -22,37 +22,65 @@ export function createInfo() {
   let pollTimer = null;
   let uptimeTimer = null;
   let startDate = null;
+  let _livestreamId = null;
 
-  async function poll() {
+  function applyOffline() {
+    live.textContent = '● OFFLINE';
+    live.classList.add('kt-offline');
+    viewers.textContent = '';
+    uptime.textContent = '';
+    clearInterval(uptimeTimer);
+    uptimeTimer = null;
+    startDate = null;
+    _livestreamId = null;
+  }
+
+  function applyStartTime(startTime) {
+    if (!startTime) return;
+    const newStart = new Date(startTime);
+    if (!startDate || newStart.getTime() !== startDate.getTime()) {
+      startDate = newStart;
+      clearInterval(uptimeTimer);
+      uptimeTimer = setInterval(() => { uptime.textContent = fmtUptime(startDate); }, 1000);
+      uptime.textContent = fmtUptime(startDate);
+    }
+  }
+
+  async function initPoll() {
     if (!state.username) return;
-    const data = await fetchViewers(state.username);
+    const data = await fetchChannelInit(state.username);
 
-    if (data.isLive === null) return;
+    if (data.isLive === null) return; // network error, keep current UI
 
     if (data.title !== null) setState({ title: data.title });
+    if (data.displayName !== null) setState({ displayName: data.displayName });
 
     live.textContent = data.isLive ? '● LIVE' : '● OFFLINE';
     live.classList.toggle('kt-offline', !data.isLive);
 
-    if (!data.isLive) {
-      viewers.textContent = '';
-      uptime.textContent = '';
-      clearInterval(uptimeTimer);
-      uptimeTimer = null;
-      startDate = null;
+    if (!data.isLive) { applyOffline(); return; }
+
+    _livestreamId = data.livestreamId;
+    if (data.viewers !== null) viewers.textContent = fmtViewers(data.viewers) + ' watching';
+    applyStartTime(data.startTime);
+  }
+
+  async function poll() {
+    if (!state.username) return;
+
+    if (!_livestreamId) {
+      await initPoll();
       return;
     }
 
-    if (data.viewers !== null) viewers.textContent = fmtViewers(data.viewers) + ' watching';
-    if (data.startTime) {
-      const newStart = new Date(data.startTime);
-      if (!startDate || newStart.getTime() !== startDate.getTime()) {
-        startDate = newStart;
-        clearInterval(uptimeTimer);
-        uptimeTimer = setInterval(() => { uptime.textContent = fmtUptime(startDate); }, 1000);
-        uptime.textContent = fmtUptime(startDate);
-      }
+    const count = await fetchViewerCount(_livestreamId);
+
+    if (count === null) {
+      await initPoll();
+      return;
     }
+
+    viewers.textContent = fmtViewers(count) + ' watching';
   }
 
   live.addEventListener('click', () => {
@@ -63,18 +91,17 @@ export function createInfo() {
     live.classList.toggle('kt-behind', !atLiveEdge);
     live.title = atLiveEdge ? '' : 'Jump to live';
     if (username && !pollTimer) {
-      poll();
+      initPoll();
       pollTimer = setInterval(poll, 30_000);
     }
   });
 
-  // Pause polling when tab is hidden, resume when visible
   document.addEventListener('visibilitychange', () => {
     if (!state.username) return;
     clearInterval(pollTimer);
     pollTimer = null;
     if (!document.hidden) {
-      poll();
+      initPoll(); // re-sync title/start time after tab was hidden
       pollTimer = setInterval(poll, 30_000);
     }
   });

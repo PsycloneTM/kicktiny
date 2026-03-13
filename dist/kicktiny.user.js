@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KickTiny
 // @namespace    https://github.com/reda777/kicktiny
-// @version      0.1.4
+// @version      0.0.0-dev
 // @description  Custom player overlay for Kick.com embeds
 // @author       Reda777
 // @match        https://player.kick.com/*
@@ -29,6 +29,7 @@ const state = {
   rate: 1,
   atLiveEdge: true,
   username: '',
+  displayName: '',
   viewers: null,
   uptime: null,
   title: null,
@@ -87,6 +88,8 @@ function savePrefs(patch) {
 
 
 // ── adapter.js ──
+
+
 
 // IVS event string literals — validated against Kick's embedded IVS 1.49 player
 const EV = {
@@ -471,7 +474,7 @@ function bindKeys() {
 }
 
 
-// ── ui/play.js ──
+// ── ui\play.js ──
 
 function createPlayBtn() {
   const btn = document.createElement('button');
@@ -499,7 +502,7 @@ function svgSpin() {
 }
 
 
-// ── ui/volume.js ──
+// ── ui\volume.js ──
 
 function createVolumeCtrl() {
   const wrap = document.createElement('div');
@@ -555,7 +558,7 @@ function svgVol(muted) {
 }
 
 
-// ── ui/popup.js ──
+// ── ui\popup.js ──
 let _popupGlobalsBound = false;
 function bindPopupGlobals() {
   if (_popupGlobalsBound) return;
@@ -608,7 +611,7 @@ function setupPopupToggle(btn, popup, onOpen) {
 }
 
 
-// ── ui/quality.js ──
+// ── ui\quality.js ──
 
 function createQualityBtn() {
   const wrap = document.createElement('div');
@@ -662,7 +665,10 @@ function makeItem(label, active, onClick, popup) {
 }
 
 
-// ── ui/speed.js ──
+// ── ui\speed.js ──
+
+
+
 
 const RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
 
@@ -709,7 +715,7 @@ function createSpeedBtn() {
 }
 
 
-// ── ui/fullscreen.js ──
+// ── ui\fullscreen.js ──
 
 function createFullscreenBtn() {
   const btn = document.createElement('button');
@@ -734,7 +740,7 @@ function svgCompress() {
 }
 
 
-// ── utils/format.js ──
+// ── utils\format.js ──
 function fmtViewers(n) {
   if (n === null || n === undefined) return '';
   if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
@@ -769,23 +775,46 @@ async function fetchChannelInfo(username) {
   return get(`/api/v2/channels/${username}`);
 }
 
-async function fetchViewers(username) {
+async function fetchChannelInit(username) {
   try {
     const data = await fetchChannelInfo(username);
     const ls = data?.livestream ?? null;
     return {
       isLive: ls !== null,
+      displayName: data?.user?.username ?? null,
+      livestreamId: ls?.id ?? null,
       viewers: ls?.viewer_count ?? null,
       startTime: ls?.start_time ?? null,
       title: ls?.session_title ?? null,
     };
   } catch {
-    return { isLive: null, viewers: null, startTime: null, title: null };
+    return { isLive: null, displayName: null, livestreamId: null, viewers: null, startTime: null, title: null };
+  }
+}
+
+async function fetchViewerCount(livestreamId) {
+  try {
+    const res = await fetch(
+      `${BASE}/current-viewers?ids[]=${encodeURIComponent(livestreamId)}`,
+      { credentials: 'omit', headers: { 'Accept': 'application/json' } },
+    );
+    if (!res.ok) throw new Error(`${res.status} /current-viewers`);
+    const data = await res.json();
+    const row = Array.isArray(data)
+      ? data.find(x => x?.livestream_id === livestreamId)
+      : null;
+    return row?.viewers ?? null;
+  } catch {
+    return null;
   }
 }
 
 
-// ── ui/info.js ──
+// ── ui\info.js ──
+
+
+
+
 
 function createInfo() {
   const wrap = document.createElement('div');
@@ -806,37 +835,65 @@ function createInfo() {
   let pollTimer = null;
   let uptimeTimer = null;
   let startDate = null;
+  let _livestreamId = null;
 
-  async function poll() {
+  function applyOffline() {
+    live.textContent = '● OFFLINE';
+    live.classList.add('kt-offline');
+    viewers.textContent = '';
+    uptime.textContent = '';
+    clearInterval(uptimeTimer);
+    uptimeTimer = null;
+    startDate = null;
+    _livestreamId = null;
+  }
+
+  function applyStartTime(startTime) {
+    if (!startTime) return;
+    const newStart = new Date(startTime);
+    if (!startDate || newStart.getTime() !== startDate.getTime()) {
+      startDate = newStart;
+      clearInterval(uptimeTimer);
+      uptimeTimer = setInterval(() => { uptime.textContent = fmtUptime(startDate); }, 1000);
+      uptime.textContent = fmtUptime(startDate);
+    }
+  }
+
+  async function initPoll() {
     if (!state.username) return;
-    const data = await fetchViewers(state.username);
+    const data = await fetchChannelInit(state.username);
 
-    if (data.isLive === null) return;
+    if (data.isLive === null) return; // network error, keep current UI
 
     if (data.title !== null) setState({ title: data.title });
+    if (data.displayName !== null) setState({ displayName: data.displayName });
 
     live.textContent = data.isLive ? '● LIVE' : '● OFFLINE';
     live.classList.toggle('kt-offline', !data.isLive);
 
-    if (!data.isLive) {
-      viewers.textContent = '';
-      uptime.textContent = '';
-      clearInterval(uptimeTimer);
-      uptimeTimer = null;
-      startDate = null;
+    if (!data.isLive) { applyOffline(); return; }
+
+    _livestreamId = data.livestreamId;
+    if (data.viewers !== null) viewers.textContent = fmtViewers(data.viewers) + ' watching';
+    applyStartTime(data.startTime);
+  }
+
+  async function poll() {
+    if (!state.username) return;
+
+    if (!_livestreamId) {
+      await initPoll();
       return;
     }
 
-    if (data.viewers !== null) viewers.textContent = fmtViewers(data.viewers) + ' watching';
-    if (data.startTime) {
-      const newStart = new Date(data.startTime);
-      if (!startDate || newStart.getTime() !== startDate.getTime()) {
-        startDate = newStart;
-        clearInterval(uptimeTimer);
-        uptimeTimer = setInterval(() => { uptime.textContent = fmtUptime(startDate); }, 1000);
-        uptime.textContent = fmtUptime(startDate);
-      }
+    const count = await fetchViewerCount(_livestreamId);
+
+    if (count === null) {
+      await initPoll();
+      return;
     }
+
+    viewers.textContent = fmtViewers(count) + ' watching';
   }
 
   live.addEventListener('click', () => {
@@ -847,18 +904,17 @@ function createInfo() {
     live.classList.toggle('kt-behind', !atLiveEdge);
     live.title = atLiveEdge ? '' : 'Jump to live';
     if (username && !pollTimer) {
-      poll();
+      initPoll();
       pollTimer = setInterval(poll, 30_000);
     }
   });
 
-  // Pause polling when tab is hidden, resume when visible
   document.addEventListener('visibilitychange', () => {
     if (!state.username) return;
     clearInterval(pollTimer);
     pollTimer = null;
     if (!document.hidden) {
-      poll();
+      initPoll(); // re-sync title/start time after tab was hidden
       pollTimer = setInterval(poll, 30_000);
     }
   });
@@ -867,7 +923,7 @@ function createInfo() {
 }
 
 
-// ── ui/bar.js ──
+// ── ui\bar.js ──
 
 function createBar() {
   const bar = document.createElement('div');
@@ -944,7 +1000,7 @@ function initBarHover(root, bar, container, topBar) {
 }
 
 
-// ── ui/overlay.js ──
+// ── ui\overlay.js ──
 
 function createOverlay() {
   const overlay = document.createElement('div');
@@ -965,7 +1021,8 @@ function createOverlay() {
 }
 
 
-// ── ui/topbar.js ──
+// ── ui\topbar.js ──
+
 
 function createTopBar() {
   const bar = document.createElement('div');
@@ -985,11 +1042,13 @@ function createTopBar() {
   bar.append(channelWrap, title);
 
   let _ready = false;
-  subscribe(({ username, title: stateTitle }) => {
+  subscribe(({ username, displayName, title: stateTitle }) => {
     if (username && !_ready) {
       _ready = true;
       channelLink.href = `https://www.kick.com/${username}`;
-      channelLink.textContent = username.charAt(0).toUpperCase() + username.slice(1);
+    }
+    if (displayName && channelLink.textContent !== displayName) {
+      channelLink.textContent = displayName;
     }
     if (stateTitle && stateTitle !== title.textContent) {
       title.textContent = stateTitle;
