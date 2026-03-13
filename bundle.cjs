@@ -65,6 +65,7 @@ function build() {
 // @supportURL   https://github.com/reda777/kicktiny
 // @grant        none
 // @run-at       document-start
+// @license      MIT
 // ==/UserScript==
 
 `;

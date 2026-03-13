@@ -97,7 +97,8 @@
 .kt-btn {
   background: none;
   border: none;
-  padding: 6px;
+  padding: 0 6px;
+  align-self: stretch;
   cursor: pointer;
   color: var(--kt-white);
   display: flex;
@@ -124,10 +125,14 @@
 .kt-vol-wrap {
   display: flex;
   align-items: center;
+  align-self: stretch;
   gap: 4px;
 }
 
 .kt-vol-clip {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
   overflow: hidden;
   max-width: 0;
   transition: max-width var(--kt-trans);
@@ -151,10 +156,17 @@
   cursor: pointer;
 }
 
+.kt-vol-slider::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255,255,255,0.3);
+}
+
 .kt-vol-slider::-webkit-slider-thumb {
   -webkit-appearance: none;
   width: 12px;
   height: 12px;
+  margin-top: -4.5px;
   border-radius: 50%;
   background: var(--kt-green);
   cursor: pointer;
@@ -174,6 +186,7 @@
 .kt-info {
   display: flex;
   align-items: center;
+  align-self: stretch;
   gap: 6px;
   padding: 0 4px;
 }
@@ -184,10 +197,13 @@
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.05em;
-  padding: 2px 5px;
-  border-radius: 3px;
+  padding: 0 8px;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  border-radius: var(--kt-radius);
   line-height: 1;
-  transition: opacity var(--kt-trans);
+  transition: background var(--kt-trans);
 }
 
 .kt-live-badge.kt-offline {
@@ -214,6 +230,9 @@
 
 .kt-popup-wrap {
   position: relative;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
 }
 
 .kt-popup {
