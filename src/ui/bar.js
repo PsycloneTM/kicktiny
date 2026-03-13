@@ -29,12 +29,14 @@ export function initBarHover(root, bar, container, topBar) {
     bar.classList.add('kt-bar-visible');
     if (topBar) topBar.classList.add('kt-top-bar-visible');
     root.classList.remove('kt-idle');
+    container.classList.remove('kt-idle');
     clearTimeout(hideTimer);
     hideTimer = setTimeout(() => {
       if (state.playing) {
         bar.classList.remove('kt-bar-visible');
         if (topBar) topBar.classList.remove('kt-top-bar-visible');
         root.classList.add('kt-idle');
+        container.classList.add('kt-idle');
       }
     }, 3000);
   };
@@ -51,6 +53,7 @@ export function initBarHover(root, bar, container, topBar) {
       bar.classList.remove('kt-bar-visible');
       if (topBar) topBar.classList.remove('kt-top-bar-visible');
       root.classList.remove('kt-idle');
+      container.classList.remove('kt-idle');
     }, 500);
   });
 
@@ -73,6 +76,7 @@ export function initBarHover(root, bar, container, topBar) {
       bar.classList.add('kt-bar-visible');
       if (topBar) topBar.classList.add('kt-top-bar-visible');
       root.classList.remove('kt-idle');
+      container.classList.remove('kt-idle');
       clearTimeout(hideTimer);
     } else {
       show();

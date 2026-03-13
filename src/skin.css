@@ -23,6 +23,7 @@
 }
 
 #kt-root.kt-idle { cursor: none; }
+.kt-idle, .kt-idle * { cursor: none !important; }
 
 /* ── top info bar ─────────────────────────────── */
 
