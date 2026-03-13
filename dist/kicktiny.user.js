@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KickTiny
 // @namespace    https://github.com/reda777/kicktiny
-// @version      0.0.0-dev
+// @version      0.1.5
 // @description  Custom player overlay for Kick.com embeds
 // @author       Reda777
 // @match        https://player.kick.com/*
@@ -88,8 +88,6 @@ function savePrefs(patch) {
 
 
 // ── adapter.js ──
-
-
 
 // IVS event string literals — validated against Kick's embedded IVS 1.49 player
 const EV = {
@@ -474,7 +472,7 @@ function bindKeys() {
 }
 
 
-// ── ui\play.js ──
+// ── ui/play.js ──
 
 function createPlayBtn() {
   const btn = document.createElement('button');
@@ -502,7 +500,7 @@ function svgSpin() {
 }
 
 
-// ── ui\volume.js ──
+// ── ui/volume.js ──
 
 function createVolumeCtrl() {
   const wrap = document.createElement('div');
@@ -558,7 +556,7 @@ function svgVol(muted) {
 }
 
 
-// ── ui\popup.js ──
+// ── ui/popup.js ──
 let _popupGlobalsBound = false;
 function bindPopupGlobals() {
   if (_popupGlobalsBound) return;
@@ -611,7 +609,7 @@ function setupPopupToggle(btn, popup, onOpen) {
 }
 
 
-// ── ui\quality.js ──
+// ── ui/quality.js ──
 
 function createQualityBtn() {
   const wrap = document.createElement('div');
@@ -665,10 +663,7 @@ function makeItem(label, active, onClick, popup) {
 }
 
 
-// ── ui\speed.js ──
-
-
-
+// ── ui/speed.js ──
 
 const RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
 
@@ -715,7 +710,7 @@ function createSpeedBtn() {
 }
 
 
-// ── ui\fullscreen.js ──
+// ── ui/fullscreen.js ──
 
 function createFullscreenBtn() {
   const btn = document.createElement('button');
@@ -740,7 +735,7 @@ function svgCompress() {
 }
 
 
-// ── utils\format.js ──
+// ── utils/format.js ──
 function fmtViewers(n) {
   if (n === null || n === undefined) return '';
   if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
@@ -810,11 +805,7 @@ async function fetchViewerCount(livestreamId) {
 }
 
 
-// ── ui\info.js ──
-
-
-
-
+// ── ui/info.js ──
 
 function createInfo() {
   const wrap = document.createElement('div');
@@ -923,7 +914,7 @@ function createInfo() {
 }
 
 
-// ── ui\bar.js ──
+// ── ui/bar.js ──
 
 function createBar() {
   const bar = document.createElement('div');
@@ -1000,7 +991,7 @@ function initBarHover(root, bar, container, topBar) {
 }
 
 
-// ── ui\overlay.js ──
+// ── ui/overlay.js ──
 
 function createOverlay() {
   const overlay = document.createElement('div');
@@ -1021,8 +1012,7 @@ function createOverlay() {
 }
 
 
-// ── ui\topbar.js ──
-
+// ── ui/topbar.js ──
 
 function createTopBar() {
   const bar = document.createElement('div');
