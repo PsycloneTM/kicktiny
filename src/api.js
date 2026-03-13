@@ -20,13 +20,14 @@ export async function fetchChannelInit(username) {
     return {
       isLive: ls !== null,
       displayName: data?.user?.username ?? null,
+      avatar: data?.user?.profile_pic ?? null,
       livestreamId: ls?.id ?? null,
       viewers: ls?.viewer_count ?? null,
       startTime: ls?.start_time ?? null,
       title: ls?.session_title ?? null,
     };
   } catch {
-    return { isLive: null, displayName: null, livestreamId: null, viewers: null, startTime: null, title: null };
+    return { isLive: null, displayName: null, avatar: null, livestreamId: null, viewers: null, startTime: null, title: null };
   }
 }
 

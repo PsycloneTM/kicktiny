@@ -12,6 +12,7 @@ export const state = {
   atLiveEdge: true,
   username: '',
   displayName: '',
+  avatar: '',
   viewers: null,
   uptime: null,
   title: null,

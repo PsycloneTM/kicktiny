@@ -54,6 +54,7 @@ export function createInfo() {
 
     if (data.title !== null) setState({ title: data.title });
     if (data.displayName !== null) setState({ displayName: data.displayName });
+    if (data.avatar !== null) setState({ avatar: data.avatar });
 
     live.textContent = data.isLive ? '● LIVE' : '● OFFLINE';
     live.classList.toggle('kt-offline', !data.isLive);

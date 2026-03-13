@@ -43,6 +43,21 @@
 
 .kt-top-bar-visible { opacity: 1; }
 
+.kt-channel-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kt-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+  border: 1.5px solid rgba(255,255,255,0.2);
+}
+
 .kt-channel-link {
   font-size: 15px;
   font-weight: 700;
