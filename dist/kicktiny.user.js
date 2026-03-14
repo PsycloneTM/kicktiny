@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KickTiny
 // @namespace    https://github.com/reda777/kicktiny
-// @version      0.1.6
+// @version      0.0.0-dev
 // @description  Custom player overlay for Kick.com embeds
 // @author       Reda777
 // @match        https://player.kick.com/*
@@ -18,7 +18,12 @@
 
 // ── state.js ──
 const state = {
-  alive: false,
+  engine: 'ivs',
+  dvrAvailable: false,
+  dvrDuration:  0,
+  dvrPosition:  0,
+  dvrQualities: [],
+  dvrQuality:   null,
   playing: false,
   buffering: false,
   qualities: [],
@@ -63,7 +68,6 @@ function subscribe(fn) {
   return () => listeners.delete(fn);
 }
 
-
 // ── prefs.js ──
 const KEYS = {
   quality: 'kt.quality',
@@ -91,7 +95,8 @@ function savePrefs(patch) {
 
 // ── adapter.js ──
 
-// IVS event string literals — validated against Kick's embedded IVS 1.49 player
+
+
 const EV = {
   STATE_CHANGED:         'PlayerStateChanged',
   QUALITY_CHANGED:       'PlayerQualityChanged',
@@ -102,21 +107,18 @@ const EV = {
   RECOVERABLE_ERROR:     'PlayerRecoverableError',
 };
 
-// IVS PlayerState string literals
 const PS = {
   PLAYING:   'Playing',
   BUFFERING: 'Buffering',
 };
 
 let _player = null;
-let _boundPlayer = null; // guard against duplicate onPlayerReady binding
+let _boundPlayer = null;
 let _retryTimer = null;
 let _latencyTimer = null;
 const MAX_RETRIES = 40;
 const RETRY_INTERVAL = 500;
 
-// Empirically, Kick's embedded IVS player gets permanently stuck on worker
-// error codes -2 and -3. A page reload is the only reliable recovery.
 const RECONNECT_CODES = new Set([-2, -3]);
 
 function getPlayer() { return _player; }
@@ -152,7 +154,6 @@ function extractPlayer() {
 }
 
 function walkFiberForPlayer(fiber) {
-  // Require a broader method surface to reduce false positives
   const isPlayer = v =>
     v &&
     typeof v === 'object' &&
@@ -201,14 +202,11 @@ function walkFiberForPlayer(fiber) {
 
 function onPlayerReady() {
   const p = _player;
-  // Guard against duplicate binding if extraction somehow runs twice
   if (!p || _boundPlayer === p) return;
   _boundPlayer = p;
 
-  // Load saved prefs before reading player state
   const prefs = loadPrefs();
 
-  // Sync initial state from player
   const vol = prefs.volume !== null ? prefs.volume : Math.round(p.getVolume() * 100);
   setState({
     alive: true,
@@ -222,7 +220,6 @@ function onPlayerReady() {
     rate: p.getPlaybackRate(),
   });
 
-  // Apply saved prefs to player
   if (prefs.volume !== null) p.setVolume(prefs.volume / 100);
   let qualityApplied = false;
   if (prefs.quality !== null) {
@@ -230,6 +227,7 @@ function onPlayerReady() {
   }
 
   p.addEventListener(EV.STATE_CHANGED, e => {
+    if (state.engine !== 'ivs') return;
     const ps = e?.state ?? e;
     const buffering = ps === PS.BUFFERING;
     const playing = ps === PS.PLAYING;
@@ -257,7 +255,6 @@ function onPlayerReady() {
 
     if (!state.autoQuality && savedName && q?.name !== savedName) {
       if (_reapplyAttempts >= MAX_REAPPLY) {
-        // IVS is refusing the quality — accept what it gives us and reset
         _reapplying = false;
         _reapplyAttempts = 0;
         setState({ quality: q, autoQuality: p.isAutoQualityMode() });
@@ -273,7 +270,6 @@ function onPlayerReady() {
           p.setAutoQualityMode(false);
           p.setQuality(match);
         } else {
-          // Saved quality no longer in stream — accept whatever IVS gives us
           _reapplying = false;
           _reapplyAttempts = 0;
           setState({ quality: q, autoQuality: p.isAutoQualityMode() });
@@ -288,16 +284,19 @@ function onPlayerReady() {
   });
 
   p.addEventListener(EV.VOLUME_CHANGED, e => {
+    if (state.engine !== 'ivs') return;
     const vol = typeof e === 'number' ? e : (e?.volume ?? p.getVolume());
     setState({ volume: Math.round(vol * 100) });
   });
 
   p.addEventListener(EV.MUTED_CHANGED, e => {
+    if (state.engine !== 'ivs') return;
     const muted = typeof e === 'boolean' ? e : (e?.muted ?? p.isMuted());
     setState({ muted });
   });
 
   p.addEventListener(EV.PLAYBACK_RATE_CHANGED, e => {
+    if (state.engine !== 'ivs') return;
     const rate = typeof e === 'number' ? e : (e?.playbackRate ?? p.getPlaybackRate());
     setState({ rate });
   });
@@ -327,7 +326,6 @@ function onPlayerReady() {
     setState({ fullscreen: !!document.fullscreenElement });
   });
 
-  // Retry quality pref if qualities were empty at init
   setTimeout(() => {
     const qs = p.getQualities();
     if (qs && qs.length) {
@@ -338,11 +336,9 @@ function onPlayerReady() {
     }
   }, 2000);
 
-  // Poll live edge latency every second.
-  // getDuration() = live edge position, getPosition() = current position.
-  // Guard against NaN/Infinity which IVS can return briefly during startup/buffering.
   clearInterval(_latencyTimer);
   _latencyTimer = setInterval(() => {
+    if (state.engine !== 'ivs') return;
     try {
       const latency = p.getLiveLatency?.();
       if (latency == null || !isFinite(latency)) return;
@@ -370,51 +366,602 @@ function applyQualityPref(p, savedName) {
   return false;
 }
 
+// ── api.js ──
+const BASE = 'https://kick.com';
+
+async function get(path) {
+  const res = await fetch(BASE + path, {
+    credentials: 'omit',
+    headers: { 'Accept': 'application/json' },
+  });
+  if (!res.ok) throw new Error(`${res.status} ${path}`);
+  return res.json();
+}
+
+async function fetchChannelInfo(username) {
+  return get(`/api/v2/channels/${username}/info`);
+}
+
+async function fetchChannelInit(username) {
+  try {
+    const data = await fetchChannelInfo(username);
+    const ls = data?.livestream ?? null;
+    return {
+      isLive:       ls?.is_live === true,
+      displayName:  data?.user?.username    ?? null,
+      avatar:       data?.user?.profile_pic ?? null,
+      vodId:        ls?.vod_id              ?? null,
+      livestreamId: ls?.id                  ?? null,
+      viewers:      ls?.viewer_count        ?? null,
+      startTime:    ls?.start_time          ?? null,
+      title:        ls?.session_title       ?? null,
+    };
+  } catch {
+    return { isLive: null, displayName: null, avatar: null, vodId: null, livestreamId: null, viewers: null, startTime: null, title: null };
+  }
+}
+
+async function fetchViewerCount(livestreamId) {
+  try {
+    const res = await fetch(
+      `${BASE}/current-viewers?ids[]=${encodeURIComponent(livestreamId)}`,
+      { credentials: 'omit', headers: { 'Accept': 'application/json' } },
+    );
+    if (!res.ok) throw new Error(`${res.status} /current-viewers`);
+    const data = await res.json();
+    const row = Array.isArray(data)
+      ? data.find(x => x?.livestream_id === livestreamId)
+      : null;
+    return row?.viewers ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function getDeviceId() {
+  const KEY = 'kt.deviceId';
+  let id = localStorage.getItem(KEY);
+  if (!id) {
+    id = crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    localStorage.setItem(KEY, id);
+  }
+  return id;
+}
+
+async function fetchDvrUrl(vodId) {
+  try {
+    const res = await fetch(
+      `https://web.kick.com/api/v1/stream/${encodeURIComponent(vodId)}/playback`,
+      {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Accept':       'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          video_player: {
+            player: {
+              player_name:             'web',
+              player_version:          'web_7a224cf6',
+              player_software:         'IVS Player',
+              player_software_version: '1.49.0',
+            },
+            mux_sdk:        { sdk_available: false },
+            datazoom_sdk:   { sdk_available: false },
+            google_ads_sdk: { sdk_available: false },
+          },
+          video_session: {
+            page_type:              'channel',
+            player_remote_played:   false,
+            viewer_connection_type: '',
+            enable_sampling:        false,
+          },
+          user_session: {
+            player_device_id:               getDeviceId(),
+            player_resettable_id:           '',
+            player_resettable_consent_type: '',
+          },
+        }),
+      },
+    );
+    if (!res.ok) throw new Error(`${res.status}`);
+    const data = await res.json();
+    const dvr = data?.playback_url?.dvr ?? null;
+    if (!dvr) throw new Error('dvr field missing from response');
+    return dvr;
+  } catch (e) {
+    console.warn('[KickTiny DVR] fetchDvrUrl failed:', e.message);
+    return null;
+  }
+}
+
+// ── dvr\discovery.js ──
+
+
+const dvr = {
+  vodId:      null,
+  url:        null,
+  ready:      false,
+  loading:    false,
+  error:      null,  
+  _listeners: [],
+};
+
+function onDvrReady(fn) {
+  if (dvr.ready) { fn(dvr.url); return; }
+  dvr._listeners.push(fn);
+}
+
+function notifyReady() {
+  dvr.ready = true;
+  dvr.loading = false;
+  dvr._listeners.forEach(fn => fn(dvr.url));
+  dvr._listeners = [];
+}
+
+async function initDvr(vodId) {
+  if (dvr.ready && dvr.vodId === vodId) return;
+  if (dvr.loading) return;
+
+  dvr.loading = true;
+  dvr.error   = null;
+  dvr.vodId   = vodId;
+
+  const url = await fetchDvrUrl(vodId);
+
+  if (!url) {
+    dvr.loading = false;
+    dvr.error   = 'fetchDvrUrl returned null';
+    console.warn('[KickTiny DVR] Could not get DVR URL — will retry on next poll');
+    dvr.vodId = null;
+    return;
+  }
+
+  dvr.url = url;
+  console.log('[KickTiny DVR] Ready:', url);
+  notifyReady();
+}
+
+// ── dvr\controller.js ──
+
+let _Hls        = null;
+let _hls        = null;
+let _dvrVideo   = null;
+let _nativeVideo= null;
+let _posTimer   = null;
+let _durTimer   = null;
+let _proTimer   = null;
+let _initUrl    = null;
+let _refreshing = false;
+let _refreshFailures = 0;
+const MAX_REFRESH_FAILURES = 3;
+const PROACTIVE_REFRESH_MS = 45 * 60 * 1000;
+const REFRESH_TIMEOUT_MS   = 15 * 1000;
+
+function getDvrVideo() { return _dvrVideo; }
+function getDvrHls()   { return _hls; }
+
+function setDvrQuality(index) {
+  if (!_hls) return;
+  if (index === 'auto') {
+    _hls.currentLevel = -1;
+    setState({ dvrQuality: null });
+  } else {
+    _hls.currentLevel = index;
+    const level = _hls.levels?.[index];
+    setState({ dvrQuality: { name: level?.name || (level?.height + 'p') || String(index), index } });
+  }
+}
+
+// ── hls.js loader ─────────────────────────────────────────────────────────────
+
+function loadHlsJs() {
+  return new Promise((resolve, reject) => {
+    if (window.Hls) { resolve(window.Hls); return; }
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js';
+    s.onload  = () => resolve(window.Hls);
+    s.onerror = () => reject(new Error('hls.js failed to load'));
+    document.head.appendChild(s);
+  });
+}
+
+function _createHlsInstance(url) {
+  if (_hls) { _hls.destroy(); _hls = null; }
+
+  _hls = new _Hls({
+    enableWorker:         true,
+    lowLatencyMode:       false,
+    autoStartLoad:        true,
+    liveDurationInfinity: false,
+  });
+
+  _hls.loadSource(url);
+  _hls.attachMedia(_dvrVideo);
+
+  _hls.on(_Hls.Events.MANIFEST_PARSED, (_, data) => {
+    const dvrQualities = data.levels
+      .map((l, i) => ({
+        name:  l.name || (l.height + 'p') || String(i),
+        index: i,
+      }))
+      .reverse();
+    console.log('[KickTiny DVR] Manifest parsed —', dvrQualities.map(q => q.name).join(', '));
+    setState({ dvrAvailable: true, dvrQualities });
+    _startDurationPoll();
+  });
+
+  _hls.on(_Hls.Events.ERROR, (_, data) => {
+    if (!data.fatal) return;
+
+    const isPlaylistError = (
+      data.type === _Hls.ErrorTypes.NETWORK_ERROR &&
+      (data.details === _Hls.ErrorDetails.MANIFEST_LOAD_ERROR      ||
+       data.details === _Hls.ErrorDetails.MANIFEST_LOAD_TIMEOUT    ||
+       data.details === _Hls.ErrorDetails.LEVEL_LOAD_ERROR         ||
+       data.details === _Hls.ErrorDetails.LEVEL_LOAD_TIMEOUT)
+    );
+
+    if (isPlaylistError && !_refreshing) {
+      console.warn('[KickTiny DVR] Fatal playlist error — attempting token refresh:', data.details);
+      _refreshDvrUrl();
+    } else if (!isPlaylistError) {
+      console.error('[KickTiny DVR] Fatal media error:', data.details);
+      _hls.recoverMediaError();
+    }
+  });
+}
+
+// ── cleanup ───────────────────────────────────────────────────────────────────
+
+function _destroy() {
+  _stopPositionPoll();
+  clearInterval(_durTimer); _durTimer = null;
+  clearTimeout(_proTimer);  _proTimer = null;
+  _refreshing = false;
+  _refreshFailures = 0;
+  if (_hls)      { _hls.destroy(); _hls = null; }
+  if (_dvrVideo) { _dvrVideo.remove(); _dvrVideo = null; }
+  _initUrl = null;
+  setState({ dvrAvailable: false, dvrDuration: 0, dvrPosition: 0, dvrQualities: [], dvrQuality: null });
+}
+
+// ── init ──────────────────────────────────────────────────────────────────────
+
+async function initDvrController(container, dvrUrl) {
+  if (_initUrl === dvrUrl) return;
+  if (_initUrl !== null) _destroy();
+
+  _initUrl     = dvrUrl;
+  _nativeVideo = container.querySelector('video');
+
+  if (!_nativeVideo) {
+    console.warn('[KickTiny DVR] No native video found in container');
+    return;
+  }
+
+  const cs = window.getComputedStyle(container);
+  if (cs.position === 'static') container.style.position = 'relative';
+
+  try {
+    _Hls = await loadHlsJs();
+  } catch (e) {
+    console.warn('[KickTiny DVR] hls.js load failed:', e.message);
+    return;
+  }
+
+  if (!_Hls.isSupported()) {
+    console.warn('[KickTiny DVR] hls.js not supported in this browser');
+    return;
+  }
+
+  _dvrVideo = document.createElement('video');
+  _dvrVideo.playsInline = true;
+  _dvrVideo.style.cssText = [
+    'position:absolute', 'inset:0', 'width:100%', 'height:100%',
+    'display:none', 'z-index:2', 'background:#000',
+  ].join(';');
+  container.appendChild(_dvrVideo);
+
+  _dvrVideo.addEventListener('playing',      () => { if (state.engine === 'dvr') setState({ playing: true,  buffering: false }); });
+  _dvrVideo.addEventListener('pause',        () => { if (state.engine === 'dvr') setState({ playing: false }); });
+  _dvrVideo.addEventListener('waiting',      () => { if (state.engine === 'dvr') setState({ buffering: true }); });
+  _dvrVideo.addEventListener('volumechange', () => { if (state.engine === 'dvr') setState({ volume: Math.round(_dvrVideo.volume * 100), muted: _dvrVideo.muted }); });
+
+  _createHlsInstance(dvrUrl);
+
+  _proTimer = setTimeout(() => {
+    if (!_refreshing) {
+      console.log('[KickTiny DVR] Proactive token refresh triggered');
+      _refreshDvrUrl();
+    }
+  }, PROACTIVE_REFRESH_MS);
+
+  console.log('[KickTiny DVR] Controller initialised');
+}
+
+// ── token refresh ─────────────────────────────────────────────────────────────
+
+async function _refreshDvrUrl() {
+  if (_refreshing) return;
+  _refreshing = true;
+
+  if (!dvr.vodId) {
+    console.warn('[KickTiny DVR] No vodId — cannot refresh');
+    _refreshing = false;
+    return;
+  }
+
+  if (_refreshFailures >= MAX_REFRESH_FAILURES) {
+    console.error('[KickTiny DVR] Max refresh failures reached — DVR unavailable');
+    setState({ dvrAvailable: false });
+    _refreshing = false;
+    return;
+  }
+
+  const newUrl = await fetchDvrUrl(dvr.vodId);
+  if (!newUrl) {
+    _refreshFailures++;
+    console.warn(`[KickTiny DVR] Refresh failed (${_refreshFailures}/${MAX_REFRESH_FAILURES})`);
+    _refreshing = false;
+    return;
+  }
+
+  dvr.url  = newUrl;
+
+  const savedPos     = _dvrVideo?.currentTime ?? 0;
+  const wasInDvr     = state.engine === 'dvr';
+  const savedQuality = state.dvrQuality;
+
+  console.log('[KickTiny DVR] Token refreshed — rebuilding hls.js, restoring at', savedPos.toFixed(1), 's');
+
+  _createHlsInstance(newUrl);
+
+  const refreshTimeout = setTimeout(() => {
+    if (_refreshing) {
+      console.warn('[KickTiny DVR] Refresh timed out — unlocking');
+      _refreshFailures++;
+      _refreshing = false;
+    }
+  }, REFRESH_TIMEOUT_MS);
+
+  const onParsed = () => {
+    _hls.off(_Hls.Events.MANIFEST_PARSED, onParsed);
+    clearTimeout(refreshTimeout);
+    _initUrl = newUrl;
+    _refreshFailures = 0;
+    _refreshing = false;
+
+    if (_dvrVideo && isFinite(savedPos) && savedPos > 0) {
+      const dur = _dvrVideo.duration;
+      _dvrVideo.currentTime = isFinite(dur) ? Math.min(savedPos, Math.max(0, dur - 1)) : savedPos;
+    }
+
+    if (savedQuality !== null && savedQuality?.index != null) {
+      const levels = _hls?.levels ?? [];
+      if (savedQuality.index < levels.length) {
+        _hls.currentLevel = savedQuality.index;
+        setState({ dvrQuality: savedQuality });
+      }
+    }
+
+    if (wasInDvr) _dvrVideo?.play().catch(() => {});
+
+    clearTimeout(_proTimer);
+    _proTimer = setTimeout(() => {
+      if (!_refreshing) _refreshDvrUrl();
+    }, PROACTIVE_REFRESH_MS);
+
+    console.log('[KickTiny DVR] Refresh complete, position restored to', savedPos.toFixed(1), 's');
+  };
+
+  _hls.on(_Hls.Events.MANIFEST_PARSED, onParsed);
+}
+
+// ── mode switching ────────────────────────────────────────────────────────────
+
+function enterDvrMode(seekTo) {
+  if (!_dvrVideo || !_nativeVideo) return;
+  if (state.engine === 'dvr') return;
+
+  const p = getPlayer();
+  if (p) p.setMuted(true);
+
+  _nativeVideo.style.visibility = 'hidden';
+  _dvrVideo.volume       = state.muted ? 0 : state.volume / 100;
+  _dvrVideo.muted        = state.muted;
+  _dvrVideo.playbackRate = state.rate;
+  _dvrVideo.style.display = 'block';
+
+  const doSeek = () => {
+    if (seekTo != null && isFinite(seekTo) && _dvrVideo.seekable.length > 0) {
+      _dvrVideo.currentTime = seekTo;
+    }
+    _dvrVideo.play().catch(() => {});
+  };
+
+  if (_dvrVideo.readyState >= 1) {
+    doSeek();
+  } else {
+    _dvrVideo.addEventListener('loadedmetadata', doSeek, { once: true });
+  }
+
+  setState({ engine: 'dvr' });
+  _startPositionPoll();
+
+  if (state.quality !== null && state.dvrQualities?.length) {
+    const match = state.dvrQualities.find(q => q.name === state.quality.name)
+      || state.dvrQualities.find(q => q.name.replace(/\d+$/, '') === state.quality.name.replace(/\d+$/, ''));
+    if (match) setDvrQuality(match.index);
+  }
+
+  console.log('[KickTiny DVR] Entered DVR mode');
+}
+
+function exitDvrMode() {
+  if (!_dvrVideo || !_nativeVideo) return;
+
+  _dvrVideo.pause();
+  _dvrVideo.style.display = 'none';
+  _nativeVideo.style.visibility = 'visible';
+
+  const p = getPlayer();
+  if (p) {
+    p.setMuted(state.muted);
+    p.setVolume(state.volume / 100);
+
+    if (state.dvrQuality !== null && state.qualities?.length) {
+      const match = state.qualities.find(q => q.name === state.dvrQuality.name)
+        || state.qualities.find(q => q.name.replace(/\d+$/, '') === state.dvrQuality.name.replace(/\d+$/, ''));
+      if (match) {
+        p.setAutoQualityMode(false);
+        p.setQuality(match);
+      }
+    }
+  }
+
+  setState({ engine: 'ivs', atLiveEdge: true });
+  _stopPositionPoll();
+  console.log('[KickTiny DVR] Exited DVR mode — back to IVS live');
+}
+
+// ── DVR actions ───────────────────────────────────────────────────────────────
+
+function dvrSeek(seconds) {
+  if (!_dvrVideo) return;
+  _dvrVideo.currentTime = seconds;
+}
+
+function dvrSeekToLive() { exitDvrMode(); }
+function getDvrDuration() { return _dvrVideo?.duration ?? 0; }
+function getDvrPosition() { return _dvrVideo?.currentTime ?? 0; }
+
+// ── polling ───────────────────────────────────────────────────────────────────
+
+function _startDurationPoll() {
+  clearInterval(_durTimer);
+  _durTimer = setInterval(() => {
+    if (!_dvrVideo) return;
+    const dur = _dvrVideo.duration;
+    if (isFinite(dur) && dur > 0) setState({ dvrDuration: dur });
+  }, 2000);
+}
+
+function _startPositionPoll() {
+  _stopPositionPoll();
+  _posTimer = setInterval(() => {
+    if (!_dvrVideo || state.engine !== 'dvr') { _stopPositionPoll(); return; }
+    const dur = _dvrVideo.duration;
+    const pos = _dvrVideo.currentTime;
+    setState({
+      dvrDuration:  isFinite(dur) ? dur : 0,
+      dvrPosition:  pos,
+      atLiveEdge:   isFinite(dur) && (dur - pos) <= 5,
+    });
+  }, 500);
+}
+
+function _stopPositionPoll() {
+  clearInterval(_posTimer);
+  _posTimer = null;
+}
+
 // ── actions.js ──
 
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+function inDvr() { return state.engine === 'dvr'; }
+
+// ── play / pause ──────────────────────────────────────────────────────────────
+
 function play() {
-  if (!state.alive) return;
-  getPlayer()?.play();
+  if (inDvr()) {
+    getDvrVideo()?.play().catch(() => {});
+  } else {
+    if (!state.alive) return;
+    getPlayer()?.play();
+  }
 }
 
 function pause() {
-  if (!state.alive) return;
-  getPlayer()?.pause();
+  if (inDvr()) {
+    getDvrVideo()?.pause();
+  } else {
+    if (!state.alive) return;
+    getPlayer()?.pause();
+  }
 }
 
 function togglePlay() {
-  if (!state.alive) return;
   state.playing ? pause() : play();
 }
 
+// ── volume / mute ─────────────────────────────────────────────────────────────
+
 let _volSaveTimer = null;
 function setVolume(pct) {
-  const p = getPlayer();
-  if (!p) return;
   const v = Math.max(0, Math.min(100, pct));
-  p.setVolume(v / 100);
-  if (v > 0 && p.isMuted()) p.setMuted(false);
+  if (inDvr()) {
+    const vid = getDvrVideo();
+    if (!vid) return;
+    vid.volume = v / 100;
+    if (v > 0) vid.muted = false;
+    setState({ volume: v, muted: vid.muted });
+  } else {
+    const p = getPlayer();
+    if (!p) return;
+    p.setVolume(v / 100);
+    if (v > 0 && p.isMuted()) p.setMuted(false);
+  }
   clearTimeout(_volSaveTimer);
   _volSaveTimer = setTimeout(() => savePrefs({ volume: v }), 300);
 }
 
 function setMuted(muted) {
-  getPlayer()?.setMuted(muted);
-}
-
-function toggleMute() {
-  const p = getPlayer();
-  if (!p) return;
-  if (state.muted || state.volume === 0) {
-    const restore = state.volume > 0 ? state.volume : 5;
-    p.setVolume(restore / 100);
-    p.setMuted(false);
+  if (inDvr()) {
+    const vid = getDvrVideo();
+    if (!vid) return;
+    vid.muted = muted;
+    setState({ muted });
   } else {
-    p.setMuted(true);
+    getPlayer()?.setMuted(muted);
   }
 }
 
+function toggleMute() {
+  if (inDvr()) {
+    const vid = getDvrVideo();
+    if (!vid) return;
+    if (state.muted || state.volume === 0) {
+      const restore = state.volume > 0 ? state.volume : 5;
+      vid.volume = restore / 100;
+      vid.muted  = false;
+      setState({ volume: restore, muted: false });
+    } else {
+      vid.muted = true;
+      setState({ muted: true });
+    }
+  } else {
+    const p = getPlayer();
+    if (!p) return;
+    if (state.muted || state.volume === 0) {
+      const restore = state.volume > 0 ? state.volume : 5;
+      p.setVolume(restore / 100);
+      p.setMuted(false);
+    } else {
+      p.setMuted(true);
+    }
+  }
+}
+
+// ── quality ───────────────────────────────────────────────────────────────────
+
 function setQuality(qualityObj) {
+  if (inDvr()) {
+    setDvrQuality(qualityObj === 'auto' ? 'auto' : qualityObj.index);
+    return;
+  }
   const p = getPlayer();
   if (!p) return;
   if (qualityObj === 'auto') {
@@ -429,19 +976,35 @@ function setQuality(qualityObj) {
   }
 }
 
+// ── rate ──────────────────────────────────────────────────────────────────────
+
 function setRate(r) {
-  const p = getPlayer();
-  if (!p) return;
-  p.setPlaybackRate(Math.max(0.25, Math.min(2, r)));
+  const clamped = Math.max(0.25, Math.min(2, r));
+  if (inDvr()) {
+    const vid = getDvrVideo();
+    if (!vid) return;
+    vid.playbackRate = clamped;
+    setState({ rate: clamped });
+  } else {
+    getPlayer()?.setPlaybackRate(clamped);
+  }
 }
 
+// ── live edge ─────────────────────────────────────────────────────────────────
+
 function seekToLive() {
+  if (inDvr()) {
+    dvrSeekToLive();
+    return;
+  }
   const p = getPlayer();
   if (!p) return;
   const latency = p.getLiveLatency?.();
   if (latency == null || !isFinite(latency)) return;
   p.seekTo(p.getPosition() + latency);
 }
+
+// ── fullscreen ────────────────────────────────────────────────────────────────
 
 function toggleFullscreen() {
   const container = document.querySelector('.aspect-video-responsive')
@@ -454,6 +1017,8 @@ function toggleFullscreen() {
   }
 }
 
+// ── keyboard ──────────────────────────────────────────────────────────────────
+
 let _keysBound = false;
 function bindKeys() {
   if (_keysBound) return;
@@ -465,16 +1030,17 @@ function bindKeys() {
       case ' ':
       case 'k': e.preventDefault(); togglePlay(); break;
       case 'm': toggleMute(); break;
-      case 'ArrowUp': e.preventDefault(); setVolume(state.volume + 5); break;
-      case 'ArrowDown': e.preventDefault(); setVolume(state.volume - 5); break;
+      case 'ArrowUp':    e.preventDefault(); setVolume(state.volume + 5); break;
+      case 'ArrowDown':  e.preventDefault(); setVolume(state.volume - 5); break;
+      case 'ArrowLeft':  e.preventDefault(); inDvr() && dvrSeek(Math.max(0, state.dvrPosition - 10)); break;
+      case 'ArrowRight': e.preventDefault(); inDvr() && dvrSeek(state.dvrPosition + 10); break;
       case 'f': toggleFullscreen(); break;
       case 'l': seekToLive(); break;
     }
   });
 }
 
-
-// ── ui/play.js ──
+// ── ui\play.js ──
 
 function createPlayBtn() {
   const btn = document.createElement('button');
@@ -502,7 +1068,7 @@ function svgSpin() {
 }
 
 
-// ── ui/volume.js ──
+// ── ui\volume.js ──
 
 function createVolumeCtrl() {
   const wrap = document.createElement('div');
@@ -520,8 +1086,6 @@ function createVolumeCtrl() {
   slider.max = 100;
   slider.step = 1;
 
-  // Clip wrapper animates max-width for show/hide — slider stays at constant
-  // 70px so the browser always has a real track for thumb position calculation.
   const clip = document.createElement('div');
   clip.className = 'kt-vol-clip';
   clip.appendChild(slider);
@@ -540,7 +1104,7 @@ function createVolumeCtrl() {
 
   subscribe(({ volume, muted }) => {
     btn.innerHTML = svgVol(muted || volume === 0);
-    if (!_dragging) slider.value = muted ? 0 : volume; // no jitter during drag
+    if (!_dragging) slider.value = muted ? 0 : volume;
     btn.title = muted ? 'Unmute (m)' : 'Mute (m)';
   });
 
@@ -558,7 +1122,7 @@ function svgVol(muted) {
 }
 
 
-// ── ui/popup.js ──
+// ── ui\popup.js ──
 let _popupGlobalsBound = false;
 function bindPopupGlobals() {
   if (_popupGlobalsBound) return;
@@ -611,7 +1175,7 @@ function setupPopupToggle(btn, popup, onOpen) {
 }
 
 
-// ── ui/quality.js ──
+// ── ui\quality.js ──
 
 function createQualityBtn() {
   const wrap = document.createElement('div');
@@ -626,30 +1190,73 @@ function createQualityBtn() {
   popup.className = 'kt-popup kt-qual-popup';
   popup.hidden = true;
 
-  // Cache last state for lazy render on open
-  let _q = { qualities: [], quality: null, autoQuality: true };
+  let _s = {
+    engine: 'ivs',
+    qualities: [], quality: null, autoQuality: true,
+    dvrQualities: [], dvrQuality: null,
+  };
 
-  setupPopupToggle(btn, popup, () => renderPopup(popup, _q.qualities, _q.quality, _q.autoQuality));
+  setupPopupToggle(btn, popup, () => renderPopup(popup, _s));
 
   document.body.appendChild(popup);
   wrap.append(btn);
 
-  subscribe(({ qualities, quality, autoQuality }) => {
-    _q = { qualities, quality, autoQuality };
-    btn.textContent = autoQuality ? 'AUTO' : (quality?.name ?? '?');
-    // Only rebuild DOM if popup is visible
-    if (!popup.hidden) renderPopup(popup, qualities, quality, autoQuality);
+  subscribe(({ engine, qualities, quality, autoQuality, dvrQualities, dvrQuality }) => {
+    _s = { engine, qualities, quality, autoQuality, dvrQualities, dvrQuality };
+
+    if (engine === 'dvr') {
+      btn.textContent = dvrQuality ? dvrQuality.name : 'AUTO';
+    } else {
+      btn.textContent = autoQuality ? 'AUTO' : (quality?.name ?? '?');
+    }
+
+    if (!popup.hidden) renderPopup(popup, _s);
   });
 
   return wrap;
 }
 
-function renderPopup(popup, qualities, current, autoQ) {
+function renderPopup(popup, s) {
+  const items = buildItems(s);
+
+  const existing = Array.from(popup.querySelectorAll('.kt-popup-item'));
+  if (!popup.hidden && existing.length === items.length) {
+    items.forEach((item, i) => {
+      const el = existing[i];
+      if (el.textContent !== item.label) el.textContent = item.label;
+      const shouldBeActive = item.active;
+      if (el.classList.contains('kt-active') !== shouldBeActive) {
+        el.classList.toggle('kt-active', shouldBeActive);
+      }
+      el.onclick = e => { e.stopPropagation(); item.onClick(); popup.hidden = true; };
+    });
+    return;
+  }
   popup.innerHTML = '';
-  popup.appendChild(makeItem('Auto', autoQ, () => setQuality('auto'), popup));
-  (qualities || []).forEach(q => {
-    popup.appendChild(makeItem(q.name, !autoQ && current?.name === q.name, () => setQuality(q), popup));
+  items.forEach(({ label, active, onClick }) => {
+    popup.appendChild(makeItem(label, active, onClick, popup));
   });
+}
+
+function buildItems(s) {
+  if (s.engine === 'dvr') {
+    return [
+      { label: 'Auto', active: s.dvrQuality === null, onClick: () => setQuality('auto') },
+      ...(s.dvrQualities || []).map(q => ({
+        label:   q.name,
+        active:  s.dvrQuality?.index === q.index,
+        onClick: () => setQuality(q),
+      })),
+    ];
+  }
+  return [
+    { label: 'Auto', active: s.autoQuality, onClick: () => setQuality('auto') },
+    ...(s.qualities || []).map(q => ({
+      label:   q.name,
+      active:  !s.autoQuality && s.quality?.name === q.name,
+      onClick: () => setQuality(q),
+    })),
+  ];
 }
 
 function makeItem(label, active, onClick, popup) {
@@ -664,8 +1271,10 @@ function makeItem(label, active, onClick, popup) {
   return item;
 }
 
+// ── ui\speed.js ──
 
-// ── ui/speed.js ──
+
+
 
 const RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
 
@@ -682,7 +1291,6 @@ function createSpeedBtn() {
   popup.className = 'kt-popup kt-speed-popup';
   popup.hidden = true;
 
-  // Build speed items
   RATES.forEach(r => {
     const item = document.createElement('button');
     item.className = 'kt-popup-item';
@@ -712,7 +1320,7 @@ function createSpeedBtn() {
 }
 
 
-// ── ui/fullscreen.js ──
+// ── ui\fullscreen.js ──
 
 function createFullscreenBtn() {
   const btn = document.createElement('button');
@@ -737,7 +1345,7 @@ function svgCompress() {
 }
 
 
-// ── utils/format.js ──
+// ── utils\format.js ──
 function fmtViewers(n) {
   if (n === null || n === undefined) return '';
   if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
@@ -754,61 +1362,21 @@ function fmtUptime(startDate) {
   return `${m}:${String(s).padStart(2,'0')}`;
 }
 
-
-
-// ── api.js ──
-const BASE = 'https://kick.com';
-
-async function get(path) {
-  const res = await fetch(BASE + path, {
-    credentials: 'omit',
-    headers: { 'Accept': 'application/json' },
-  });
-  if (!res.ok) throw new Error(`${res.status} ${path}`);
-  return res.json();
+function fmtDuration(totalSec) {
+  const t = Math.max(0, Math.floor(totalSec));
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const s = t % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+  return `${m}:${String(s).padStart(2,'0')}`;
 }
 
-async function fetchChannelInfo(username) {
-  return get(`/api/v2/channels/${username}`);
-}
-
-async function fetchChannelInit(username) {
-  try {
-    const data = await fetchChannelInfo(username);
-    const ls = data?.livestream ?? null;
-    return {
-      isLive: ls !== null,
-      displayName: data?.user?.username ?? null,
-      avatar: data?.user?.profile_pic ?? null,
-      livestreamId: ls?.id ?? null,
-      viewers: ls?.viewer_count ?? null,
-      startTime: ls?.start_time ?? null,
-      title: ls?.session_title ?? null,
-    };
-  } catch {
-    return { isLive: null, displayName: null, avatar: null, livestreamId: null, viewers: null, startTime: null, title: null };
-  }
-}
-
-async function fetchViewerCount(livestreamId) {
-  try {
-    const res = await fetch(
-      `${BASE}/current-viewers?ids[]=${encodeURIComponent(livestreamId)}`,
-      { credentials: 'omit', headers: { 'Accept': 'application/json' } },
-    );
-    if (!res.ok) throw new Error(`${res.status} /current-viewers`);
-    const data = await res.json();
-    const row = Array.isArray(data)
-      ? data.find(x => x?.livestream_id === livestreamId)
-      : null;
-    return row?.viewers ?? null;
-  } catch {
-    return null;
-  }
-}
+// ── ui\info.js ──
 
 
-// ── ui/info.js ──
+
+
+
 
 function createInfo() {
   const wrap = document.createElement('div');
@@ -830,7 +1398,6 @@ function createInfo() {
   let uptimeTimer = null;
   let startDate = null;
   let _livestreamId = null;
-
   function applyOffline() {
     live.textContent = '● OFFLINE';
     live.classList.add('kt-offline');
@@ -857,8 +1424,7 @@ function createInfo() {
     if (!state.username) return;
     const data = await fetchChannelInit(state.username);
 
-    if (data.isLive === null) return; // network error, keep current UI
-
+    if (data.isLive === null) return;
     if (data.title !== null) setState({ title: data.title });
     if (data.displayName !== null) setState({ displayName: data.displayName });
     if (data.avatar !== null) setState({ avatar: data.avatar });
@@ -867,6 +1433,7 @@ function createInfo() {
     live.classList.toggle('kt-offline', !data.isLive);
 
     if (!data.isLive) { applyOffline(); return; }
+    if (data.vodId !== null) initDvr(data.vodId);
 
     _livestreamId = data.livestreamId;
     if (data.viewers !== null) viewers.textContent = fmtViewers(data.viewers) + ' watching';
@@ -909,7 +1476,7 @@ function createInfo() {
     clearInterval(pollTimer);
     pollTimer = null;
     if (!document.hidden) {
-      initPoll(); // re-sync title/start time after tab was hidden
+      initPoll();
       pollTimer = setInterval(poll, 30_000);
     }
   });
@@ -918,11 +1485,144 @@ function createInfo() {
 }
 
 
-// ── ui/bar.js ──
+// ── ui\seekbar.js ──
+
+
+
+
+function createSeekbar() {
+  const wrap = document.createElement('div');
+  wrap.className = 'kt-seekbar';
+
+  const track = document.createElement('div');
+  track.className = 'kt-seekbar-track';
+
+  const prog = document.createElement('div');
+  prog.className = 'kt-seekbar-prog';
+
+  const thumb = document.createElement('div');
+  thumb.className = 'kt-seekbar-thumb';
+
+  const tip = document.createElement('div');
+  tip.className = 'kt-seekbar-tip';
+
+  track.append(prog, thumb);
+  wrap.append(track, tip);
+
+  let _dragging = false;
+  let _duration  = 0;
+
+  // ── rendering ─────────────────────────────────────────────────────────────
+
+  function render(pos, dur) {
+    if (dur <= 0) { prog.style.width = '100%'; thumb.style.left = '100%'; return; }
+    const pct = Math.min(1, pos / dur) * 100;
+    prog.style.width = `${pct}%`;
+    thumb.style.left = `${pct}%`;
+  }
+
+  // ── tooltip ───────────────────────────────────────────────────────────────
+
+  function showTip(e) {
+    if (_duration <= 0) return;
+    const rect   = track.getBoundingClientRect();
+    const wRect  = wrap.getBoundingClientRect();
+    const pct    = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const behind = _duration - pct * _duration;
+
+    tip.textContent    = behind <= 3 ? 'LIVE' : '-' + fmtDuration(behind);
+    tip.style.display  = 'block';
+
+    const tipW  = tip.offsetWidth;
+    const trackOffsetInWrap = rect.left - wRect.left;
+    let left = trackOffsetInWrap + (e.clientX - rect.left) - tipW / 2;
+    left = Math.max(0, Math.min(wRect.width - tipW, left));
+    tip.style.left = `${left}px`;
+  }
+
+  function hideTip() {
+    if (!_dragging) tip.style.display = 'none';
+  }
+
+  // ── seek logic ────────────────────────────────────────────────────────────
+
+  function pctFromEvent(e) {
+    const rect = track.getBoundingClientRect();
+    return Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  }
+
+  function seekFromEvent(e) {
+    if (_duration <= 0) return;
+    const target = pctFromEvent(e) * _duration;
+    const behind = _duration - target;
+
+    render(target, _duration);
+
+    if (behind <= 3) {
+      dvrSeekToLive();
+    } else if (state.engine !== 'dvr') {
+      enterDvrMode(target);
+    } else {
+      dvrSeek(target);
+    }
+  }
+
+  // ── events ────────────────────────────────────────────────────────────────
+
+  wrap.addEventListener('mouseenter', e => showTip(e));
+  wrap.addEventListener('mousemove',  e => showTip(e));
+  wrap.addEventListener('mouseleave', () => hideTip());
+
+  wrap.addEventListener('mousedown', e => {
+    _dragging = true;
+    seekFromEvent(e);
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', e => {
+    if (!_dragging) return;
+    showTip(e);
+    seekFromEvent(e);
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!_dragging) return;
+    _dragging = false;
+    tip.style.display = 'none';
+  });
+
+  // ── state subscription ────────────────────────────────────────────────────
+
+  subscribe(({ dvrAvailable, dvrDuration, dvrPosition, engine }) => {
+    const usable = dvrAvailable && dvrDuration > 0;
+    wrap.style.display = usable ? 'block' : 'none';
+    if (!usable) return;
+
+    _duration = dvrDuration;
+
+    if (_dragging) return;
+
+    if (engine === 'ivs') {
+      render(_duration, _duration);
+    } else {
+      render(dvrPosition, dvrDuration);
+    }
+  });
+
+  wrap.style.display = 'none';
+  return wrap;
+}
+
+// ── ui\bar.js ──
 
 function createBar() {
   const bar = document.createElement('div');
   bar.className = 'kt-bar';
+
+  const seekbar = createSeekbar();
+
+  const controls = document.createElement('div');
+  controls.className = 'kt-controls';
 
   const left = document.createElement('div');
   left.className = 'kt-bar-left';
@@ -932,7 +1632,8 @@ function createBar() {
   right.className = 'kt-bar-right';
   right.append(createSpeedBtn(), createQualityBtn(), createFullscreenBtn());
 
-  bar.append(left, right);
+  controls.append(left, right);
+  bar.append(seekbar, controls);
   return bar;
 }
 
@@ -998,8 +1699,7 @@ function initBarHover(root, bar, container, topBar) {
   });
 }
 
-
-// ── ui/overlay.js ──
+// ── ui\overlay.js ──
 
 function createOverlay() {
   const overlay = document.createElement('div');
@@ -1020,7 +1720,8 @@ function createOverlay() {
 }
 
 
-// ── ui/topbar.js ──
+// ── ui\topbar.js ──
+
 
 function createTopBar() {
   const bar = document.createElement('div');
@@ -1069,7 +1770,7 @@ function createTopBar() {
 
 // ── main.js ──
 
-const CSS = `:root{--kt-black:#0d0d0d;--kt-white:#f0f0f0;--kt-green:#53fc18;--kt-dim:rgba(255,255,255,0.55);--kt-bar-h:48px;--kt-radius:5px;--kt-font:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;--kt-size:13px;--kt-trans:0.2s ease}#kt-root{position:absolute;inset:0;z-index:9999;pointer-events:none;font-family:var(--kt-font);font-size:var(--kt-size);color:var(--kt-white);user-select:none;-webkit-user-select:none}#kt-root.kt-idle{cursor:none}.kt-idle,.kt-idle *{cursor:none !important}.kt-top-bar{position:absolute;top:0;left:0;right:0;padding:10px 14px;display:flex;flex-direction:column;gap:2px;background:linear-gradient(to bottom,rgba(0,0,0,0.85) 0%,rgba(0,0,0,0.5) 60%,transparent 100%);opacity:0;transition:opacity var(--kt-trans)}.kt-top-bar-visible{opacity:1}.kt-channel-wrap{display:flex;align-items:center;gap:8px}.kt-avatar{width:28px;height:28px;border-radius:50%;object-fit:cover;flex-shrink:0;border:1.5px solid rgba(255,255,255,0.2)}.kt-channel-link{font-size:15px;font-weight:700;color:var(--kt-white);text-decoration:none;line-height:1.2;pointer-events:auto}.kt-channel-link:hover{color:var(--kt-green)}.kt-stream-title{font-size:13px;color:var(--kt-white);white-space:nowrap;overflow-x:hidden;text-overflow:ellipsis;line-height:1.3}.kt-bar{position:absolute;bottom:0;left:0;right:0;height:var(--kt-bar-h);display:flex;align-items:center;justify-content:space-between;padding:0 10px;gap:6px;background:linear-gradient(to top,rgba(0,0,0,0.75) 0%,transparent 100%);pointer-events:all;opacity:0;transition:opacity var(--kt-trans);overflow:visible}.kt-bar-visible{opacity:1}.kt-bar-left,.kt-bar-right{display:flex;align-items:center;gap:4px;overflow:visible}.kt-btn{background:none;border:none;padding:0 6px;align-self:stretch;cursor:pointer;color:var(--kt-white);display:flex;align-items:center;justify-content:center;border-radius:var(--kt-radius);transition:color var(--kt-trans),background var(--kt-trans);line-height:0}.kt-btn:hover{color:var(--kt-green);background:rgba(255,255,255,0.08)}.kt-btn svg{width:20px;height:20px}@keyframes kt-spin{to{transform:rotate(360deg)}}.kt-spin{animation:kt-spin 0.8s linear infinite}.kt-vol-wrap{display:flex;align-items:center;align-self:stretch;gap:4px}.kt-vol-clip{display:flex;align-items:center;align-self:stretch;overflow:hidden;max-width:0;transition:max-width var(--kt-trans)}.kt-vol-wrap:hover .kt-vol-clip,.kt-vol-clip:focus-within{max-width:74px}.kt-vol-slider{-webkit-appearance:none;appearance:none;width:70px;flex-shrink:0;margin-left:4px;height:3px;border-radius:2px;background:rgba(255,255,255,0.3);outline:none;cursor:pointer}.kt-vol-slider::-webkit-slider-runnable-track{height:3px;border-radius:2px;background:rgba(255,255,255,0.3)}.kt-vol-slider::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;margin-top:-4.5px;border-radius:50%;background:var(--kt-green);cursor:pointer}.kt-vol-slider::-moz-range-thumb{width:12px;height:12px;border-radius:50%;background:var(--kt-green);cursor:pointer;border:none}.kt-info{display:flex;align-items:center;align-self:stretch;gap:6px;padding:0 4px}.kt-live-badge{background:#eb0400;color:#fff;font-size:10px;font-weight:700;letter-spacing:0.05em;padding:0 8px;align-self:stretch;display:flex;align-items:center;border-radius:var(--kt-radius);line-height:1;transition:background var(--kt-trans)}.kt-live-badge.kt-offline{background:#555}.kt-live-badge.kt-behind{background:#555;cursor:pointer}.kt-live-badge.kt-behind:hover{background:#eb0400}.kt-viewers,.kt-uptime{color:var(--kt-dim);font-size:12px;white-space:nowrap}.kt-popup-wrap{position:relative;align-self:stretch;display:flex;align-items:center}.kt-popup{position:fixed;min-width:120px;overflow-y:auto;background:rgba(18,18,18,0.97);border:1px solid rgba(255,255,255,0.12);border-radius:10px;padding:6px;z-index:99999;box-shadow:0 8px 24px rgba(0,0,0,0.6);font-family:var(--kt-font)}.kt-popup[hidden]{display:none}.kt-popup-item{display:block;width:100%;padding:7px 12px;text-align:left;background:none;border:none;color:var(--kt-white);font-size:var(--kt-size);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;cursor:pointer;white-space:nowrap;border-radius:6px;transition:color 0.2s ease,background 0.2s ease}.kt-popup-item:hover{color:var(--kt-white);background:rgba(255,255,255,0.1)}.kt-popup-item.kt-active{color:var(--kt-green)}.kt-qual-btn,.kt-speed-btn{font-size:12px;font-weight:600;padding:6px 8px;letter-spacing:0.02em}.kt-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:all;transition:opacity var(--kt-trans)}.kt-overlay-hidden{opacity:0;pointer-events:none}.kt-overlay-btn{background:rgba(0,0,0,0.5);border:none;border-radius:50%;width:60px;height:60px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--kt-white);transition:transform var(--kt-trans),background var(--kt-trans)}.kt-overlay-btn:hover{transform:scale(1.1);background:rgba(83,252,24,0.25);color:var(--kt-green)}.kt-overlay-btn svg{width:32px;height:32px}`;
+const CSS = `:root{--kt-black:#0d0d0d;--kt-white:#f0f0f0;--kt-green:#53fc18;--kt-dim:rgba(255,255,255,0.55);--kt-bar-h:48px;--kt-radius:5px;--kt-font:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;--kt-size:13px;--kt-trans:0.2s ease}#kt-root{position:absolute;inset:0;z-index:9999;pointer-events:none;font-family:var(--kt-font);font-size:var(--kt-size);color:var(--kt-white);user-select:none;-webkit-user-select:none}#kt-root.kt-idle{cursor:none}.kt-idle,.kt-idle *{cursor:none !important}.kt-top-bar{position:absolute;top:0;left:0;right:0;padding:10px 14px;display:flex;flex-direction:column;gap:2px;background:linear-gradient(to bottom,rgba(0,0,0,0.85) 0%,rgba(0,0,0,0.5) 60%,transparent 100%);opacity:0;transition:opacity var(--kt-trans)}.kt-top-bar-visible{opacity:1}.kt-channel-wrap{display:flex;align-items:center;gap:8px}.kt-avatar{width:28px;height:28px;border-radius:50%;object-fit:cover;flex-shrink:0;border:1.5px solid rgba(255,255,255,0.2)}.kt-channel-link{font-size:15px;font-weight:700;color:var(--kt-white);text-decoration:none;line-height:1.2;pointer-events:auto}.kt-channel-link:hover{color:var(--kt-green)}.kt-stream-title{font-size:13px;color:var(--kt-white);white-space:nowrap;overflow-x:hidden;text-overflow:ellipsis;line-height:1.3}.kt-bar{position:absolute;bottom:0;left:0;right:0;display:flex;flex-direction:column;padding:0;gap:0;background:linear-gradient(to top,rgba(0,0,0,0.75) 0%,transparent 100%);pointer-events:all;opacity:0;transition:opacity var(--kt-trans);overflow:visible}.kt-bar-visible{opacity:1}.kt-controls{height:var(--kt-bar-h);display:flex;align-items:stretch;justify-content:space-between;padding:0 10px;gap:6px;overflow:visible}.kt-bar-left,.kt-bar-right{display:flex;align-items:center;gap:4px;overflow:visible}.kt-seekbar{width:100%;padding:10px 10px 4px;box-sizing:border-box;cursor:pointer;position:relative}.kt-seekbar-track{position:relative;height:3px;border-radius:2px;background:rgba(255,255,255,0.25);transition:height var(--kt-trans)}.kt-seekbar:hover .kt-seekbar-track{height:5px}.kt-seekbar-prog{position:absolute;left:0;top:0;height:100%;width:0%;background:var(--kt-green);border-radius:2px;pointer-events:none}.kt-seekbar-thumb{position:absolute;top:50%;left:0%;width:13px;height:13px;border-radius:50%;background:#fff;transform:translate(-50%,-50%) scale(0);transition:transform 0.15s ease;pointer-events:none}.kt-seekbar:hover .kt-seekbar-thumb{transform:translate(-50%,-50%) scale(1)}.kt-seekbar-tip{position:absolute;bottom:calc(100%+6px);display:none;background:rgba(18,18,18,0.9);color:var(--kt-white);font-size:11px;font-weight:600;padding:3px 7px;border-radius:4px;white-space:nowrap;pointer-events:none;user-select:none}.kt-btn{background:none;border:none;padding:0 6px;align-self:stretch;cursor:pointer;color:var(--kt-white);display:flex;align-items:center;justify-content:center;border-radius:var(--kt-radius);transition:color var(--kt-trans),background var(--kt-trans);line-height:0}.kt-btn:hover{color:var(--kt-green);background:rgba(255,255,255,0.08)}.kt-btn svg{width:20px;height:20px}@keyframes kt-spin{to{transform:rotate(360deg)}}.kt-spin{animation:kt-spin 0.8s linear infinite}.kt-vol-wrap{display:flex;align-items:center;align-self:stretch;gap:4px}.kt-vol-clip{display:flex;align-items:center;align-self:stretch;overflow:hidden;max-width:0;transition:max-width var(--kt-trans)}.kt-vol-wrap:hover .kt-vol-clip,.kt-vol-clip:focus-within{max-width:74px}.kt-vol-slider{-webkit-appearance:none;appearance:none;width:70px;flex-shrink:0;margin-left:4px;height:3px;border-radius:2px;background:rgba(255,255,255,0.3);outline:none;cursor:pointer}.kt-vol-slider::-webkit-slider-runnable-track{height:3px;border-radius:2px;background:rgba(255,255,255,0.3)}.kt-vol-slider::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;margin-top:-4.5px;border-radius:50%;background:var(--kt-green);cursor:pointer}.kt-vol-slider::-moz-range-thumb{width:12px;height:12px;border-radius:50%;background:var(--kt-green);cursor:pointer;border:none}.kt-info{display:flex;align-items:center;align-self:stretch;gap:6px;padding:0 4px}.kt-live-badge{background:#eb0400;color:#fff;font-size:10px;font-weight:700;letter-spacing:0.05em;padding:0 8px;align-self:stretch;display:flex;align-items:center;border-radius:var(--kt-radius);line-height:1;transition:background var(--kt-trans)}.kt-live-badge.kt-offline{background:#555}.kt-live-badge.kt-behind{background:#555;cursor:pointer}.kt-live-badge.kt-behind:hover{background:#eb0400}.kt-viewers,.kt-uptime{color:var(--kt-dim);font-size:12px;white-space:nowrap}.kt-popup-wrap{position:relative;align-self:stretch;display:flex;align-items:center}.kt-popup{position:fixed;min-width:120px;overflow-y:auto;background:rgba(18,18,18,0.97);border:1px solid rgba(255,255,255,0.12);border-radius:10px;padding:6px;z-index:99999;box-shadow:0 8px 24px rgba(0,0,0,0.6);font-family:var(--kt-font);pointer-events:all;cursor:default}.kt-popup[hidden]{display:none}.kt-popup-item{display:block;width:100%;padding:7px 12px;text-align:left;background:none;border:none;color:var(--kt-white);font-size:var(--kt-size);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;cursor:pointer;white-space:nowrap;border-radius:6px;transition:color 0.2s ease,background 0.2s ease}.kt-popup-item:hover{color:var(--kt-white);background:rgba(255,255,255,0.1)}.kt-popup-item.kt-active{color:var(--kt-green)}.kt-qual-btn,.kt-speed-btn{font-size:12px;font-weight:600;padding:6px 8px;letter-spacing:0.02em}.kt-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:all;transition:opacity var(--kt-trans)}.kt-overlay-hidden{opacity:0;pointer-events:none}.kt-overlay-btn{background:rgba(0,0,0,0.5);border:none;border-radius:50%;width:60px;height:60px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--kt-white);transition:transform var(--kt-trans),background var(--kt-trans)}.kt-overlay-btn:hover{transform:scale(1.1);background:rgba(83,252,24,0.25);color:var(--kt-green)}.kt-overlay-btn svg{width:32px;height:32px}`;
 
 function injectStyles(css) {
   const style = document.createElement('style');
@@ -1147,6 +1848,10 @@ async function init() {
     initAdapter();
     bindKeys();
 
+    onDvrReady(url => {
+      initDvrController(container, url);
+    });
+
     console.log('[KickTiny] Initialized for', getUsername() || 'unknown');
   } catch (e) {
     console.warn(e.message);
@@ -1158,5 +1863,4 @@ if (document.readyState === 'loading') {
 } else {
   init();
 }
-
 })();

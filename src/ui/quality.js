@@ -1,6 +1,6 @@
 import { setQuality } from '../actions.js';
 import { subscribe } from '../state.js';
-import { setupPopupToggle, openPopup } from './popup.js';
+import { setupPopupToggle } from './popup.js';
 
 export function createQualityBtn() {
   const wrap = document.createElement('div');
@@ -15,30 +15,73 @@ export function createQualityBtn() {
   popup.className = 'kt-popup kt-qual-popup';
   popup.hidden = true;
 
-  // Cache last state for lazy render on open
-  let _q = { qualities: [], quality: null, autoQuality: true };
+  let _s = {
+    engine: 'ivs',
+    qualities: [], quality: null, autoQuality: true,
+    dvrQualities: [], dvrQuality: null,
+  };
 
-  setupPopupToggle(btn, popup, () => renderPopup(popup, _q.qualities, _q.quality, _q.autoQuality));
+  setupPopupToggle(btn, popup, () => renderPopup(popup, _s));
 
   document.body.appendChild(popup);
   wrap.append(btn);
 
-  subscribe(({ qualities, quality, autoQuality }) => {
-    _q = { qualities, quality, autoQuality };
-    btn.textContent = autoQuality ? 'AUTO' : (quality?.name ?? '?');
-    // Only rebuild DOM if popup is visible
-    if (!popup.hidden) renderPopup(popup, qualities, quality, autoQuality);
+  subscribe(({ engine, qualities, quality, autoQuality, dvrQualities, dvrQuality }) => {
+    _s = { engine, qualities, quality, autoQuality, dvrQualities, dvrQuality };
+
+    if (engine === 'dvr') {
+      btn.textContent = dvrQuality ? dvrQuality.name : 'AUTO';
+    } else {
+      btn.textContent = autoQuality ? 'AUTO' : (quality?.name ?? '?');
+    }
+
+    if (!popup.hidden) renderPopup(popup, _s);
   });
 
   return wrap;
 }
 
-function renderPopup(popup, qualities, current, autoQ) {
+function renderPopup(popup, s) {
+  const items = buildItems(s);
+
+  const existing = Array.from(popup.querySelectorAll('.kt-popup-item'));
+  if (!popup.hidden && existing.length === items.length) {
+    items.forEach((item, i) => {
+      const el = existing[i];
+      if (el.textContent !== item.label) el.textContent = item.label;
+      const shouldBeActive = item.active;
+      if (el.classList.contains('kt-active') !== shouldBeActive) {
+        el.classList.toggle('kt-active', shouldBeActive);
+      }
+      el.onclick = e => { e.stopPropagation(); item.onClick(); popup.hidden = true; };
+    });
+    return;
+  }
   popup.innerHTML = '';
-  popup.appendChild(makeItem('Auto', autoQ, () => setQuality('auto'), popup));
-  (qualities || []).forEach(q => {
-    popup.appendChild(makeItem(q.name, !autoQ && current?.name === q.name, () => setQuality(q), popup));
+  items.forEach(({ label, active, onClick }) => {
+    popup.appendChild(makeItem(label, active, onClick, popup));
   });
+}
+
+function buildItems(s) {
+  if (s.engine === 'dvr') {
+    return [
+      { label: 'Auto', active: s.dvrQuality === null, onClick: () => setQuality('auto') },
+      ...(s.dvrQualities || []).map(q => ({
+        label:   q.name,
+        active:  s.dvrQuality?.index === q.index,
+        onClick: () => setQuality(q),
+      })),
+    ];
+  }
+  return [
+    { label: 'Auto', active: s.autoQuality, onClick: () => setQuality('auto') },
+    ...(s.qualities || []).map(q => ({
+      label:   q.name,
+      active:  !s.autoQuality && s.quality?.name === q.name,
+      onClick: () => setQuality(q),
+    })),
+  ];
 }
 
 function makeItem(label, active, onClick, popup) {

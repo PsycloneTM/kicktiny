@@ -1,50 +1,101 @@
 import { getPlayer } from './adapter.js';
 import { state, setState } from './state.js';
 import { savePrefs } from './prefs.js';
+import { getDvrVideo, dvrSeek, dvrSeekToLive, setDvrQuality } from './dvr/controller.js';
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+function inDvr() { return state.engine === 'dvr'; }
+
+// ── play / pause ──────────────────────────────────────────────────────────────
 
 export function play() {
-  if (!state.alive) return;
-  getPlayer()?.play();
+  if (inDvr()) {
+    getDvrVideo()?.play().catch(() => {});
+  } else {
+    if (!state.alive) return;
+    getPlayer()?.play();
+  }
 }
 
 export function pause() {
-  if (!state.alive) return;
-  getPlayer()?.pause();
+  if (inDvr()) {
+    getDvrVideo()?.pause();
+  } else {
+    if (!state.alive) return;
+    getPlayer()?.pause();
+  }
 }
 
 export function togglePlay() {
-  if (!state.alive) return;
   state.playing ? pause() : play();
 }
 
+// ── volume / mute ─────────────────────────────────────────────────────────────
+
 let _volSaveTimer = null;
 export function setVolume(pct) {
-  const p = getPlayer();
-  if (!p) return;
   const v = Math.max(0, Math.min(100, pct));
-  p.setVolume(v / 100);
-  if (v > 0 && p.isMuted()) p.setMuted(false);
+  if (inDvr()) {
+    const vid = getDvrVideo();
+    if (!vid) return;
+    vid.volume = v / 100;
+    if (v > 0) vid.muted = false;
+    setState({ volume: v, muted: vid.muted });
+  } else {
+    const p = getPlayer();
+    if (!p) return;
+    p.setVolume(v / 100);
+    if (v > 0 && p.isMuted()) p.setMuted(false);
+  }
   clearTimeout(_volSaveTimer);
   _volSaveTimer = setTimeout(() => savePrefs({ volume: v }), 300);
 }
 
 export function setMuted(muted) {
-  getPlayer()?.setMuted(muted);
-}
-
-export function toggleMute() {
-  const p = getPlayer();
-  if (!p) return;
-  if (state.muted || state.volume === 0) {
-    const restore = state.volume > 0 ? state.volume : 5;
-    p.setVolume(restore / 100);
-    p.setMuted(false);
+  if (inDvr()) {
+    const vid = getDvrVideo();
+    if (!vid) return;
+    vid.muted = muted;
+    setState({ muted });
   } else {
-    p.setMuted(true);
+    getPlayer()?.setMuted(muted);
   }
 }
 
+export function toggleMute() {
+  if (inDvr()) {
+    const vid = getDvrVideo();
+    if (!vid) return;
+    if (state.muted || state.volume === 0) {
+      const restore = state.volume > 0 ? state.volume : 5;
+      vid.volume = restore / 100;
+      vid.muted  = false;
+      setState({ volume: restore, muted: false });
+    } else {
+      vid.muted = true;
+      setState({ muted: true });
+    }
+  } else {
+    const p = getPlayer();
+    if (!p) return;
+    if (state.muted || state.volume === 0) {
+      const restore = state.volume > 0 ? state.volume : 5;
+      p.setVolume(restore / 100);
+      p.setMuted(false);
+    } else {
+      p.setMuted(true);
+    }
+  }
+}
+
+// ── quality ───────────────────────────────────────────────────────────────────
+
 export function setQuality(qualityObj) {
+  if (inDvr()) {
+    setDvrQuality(qualityObj === 'auto' ? 'auto' : qualityObj.index);
+    return;
+  }
   const p = getPlayer();
   if (!p) return;
   if (qualityObj === 'auto') {
@@ -59,19 +110,35 @@ export function setQuality(qualityObj) {
   }
 }
 
+// ── rate ──────────────────────────────────────────────────────────────────────
+
 export function setRate(r) {
-  const p = getPlayer();
-  if (!p) return;
-  p.setPlaybackRate(Math.max(0.25, Math.min(2, r)));
+  const clamped = Math.max(0.25, Math.min(2, r));
+  if (inDvr()) {
+    const vid = getDvrVideo();
+    if (!vid) return;
+    vid.playbackRate = clamped;
+    setState({ rate: clamped });
+  } else {
+    getPlayer()?.setPlaybackRate(clamped);
+  }
 }
 
+// ── live edge ─────────────────────────────────────────────────────────────────
+
 export function seekToLive() {
+  if (inDvr()) {
+    dvrSeekToLive();
+    return;
+  }
   const p = getPlayer();
   if (!p) return;
   const latency = p.getLiveLatency?.();
   if (latency == null || !isFinite(latency)) return;
   p.seekTo(p.getPosition() + latency);
 }
+
+// ── fullscreen ────────────────────────────────────────────────────────────────
 
 export function toggleFullscreen() {
   const container = document.querySelector('.aspect-video-responsive')
@@ -84,6 +151,8 @@ export function toggleFullscreen() {
   }
 }
 
+// ── keyboard ──────────────────────────────────────────────────────────────────
+
 let _keysBound = false;
 export function bindKeys() {
   if (_keysBound) return;
@@ -95,8 +164,10 @@ export function bindKeys() {
       case ' ':
       case 'k': e.preventDefault(); togglePlay(); break;
       case 'm': toggleMute(); break;
-      case 'ArrowUp': e.preventDefault(); setVolume(state.volume + 5); break;
-      case 'ArrowDown': e.preventDefault(); setVolume(state.volume - 5); break;
+      case 'ArrowUp':    e.preventDefault(); setVolume(state.volume + 5); break;
+      case 'ArrowDown':  e.preventDefault(); setVolume(state.volume - 5); break;
+      case 'ArrowLeft':  e.preventDefault(); inDvr() && dvrSeek(Math.max(0, state.dvrPosition - 10)); break;
+      case 'ArrowRight': e.preventDefault(); inDvr() && dvrSeek(state.dvrPosition + 10); break;
       case 'f': toggleFullscreen(); break;
       case 'l': seekToLive(); break;
     }

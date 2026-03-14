@@ -127,7 +127,7 @@ function startWatcher() {
     debounce = setTimeout(() => {
       console.log(`[watch] ${filename} changed`);
       try { build(); } catch (e) { console.error('[build error]', e.message); }
-    }, 80); // 80ms debounce — coalesces multi-file saves
+    }, 80);
   });
   console.log('[watch] Watching src/ for changes...');
 }

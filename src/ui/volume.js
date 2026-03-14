@@ -17,8 +17,6 @@ export function createVolumeCtrl() {
   slider.max = 100;
   slider.step = 1;
 
-  // Clip wrapper animates max-width for show/hide — slider stays at constant
-  // 70px so the browser always has a real track for thumb position calculation.
   const clip = document.createElement('div');
   clip.className = 'kt-vol-clip';
   clip.appendChild(slider);
@@ -37,7 +35,7 @@ export function createVolumeCtrl() {
 
   subscribe(({ volume, muted }) => {
     btn.innerHTML = svgVol(muted || volume === 0);
-    if (!_dragging) slider.value = muted ? 0 : volume; // no jitter during drag
+    if (!_dragging) slider.value = muted ? 0 : volume;
     btn.title = muted ? 'Unmute (m)' : 'Mute (m)';
   });
 

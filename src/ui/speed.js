@@ -17,7 +17,6 @@ export function createSpeedBtn() {
   popup.className = 'kt-popup kt-speed-popup';
   popup.hidden = true;
 
-  // Build speed items
   RATES.forEach(r => {
     const item = document.createElement('button');
     item.className = 'kt-popup-item';

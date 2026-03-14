@@ -85,12 +85,10 @@
   bottom: 0;
   left: 0;
   right: 0;
-  height: var(--kt-bar-h);
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 10px;
-  gap: 6px;
+  flex-direction: column;
+  padding: 0;
+  gap: 0;
   background: linear-gradient(to top, rgba(0,0,0,0.75) 0%, transparent 100%);
   pointer-events: all;
   opacity: 0;
@@ -100,12 +98,87 @@
 
 .kt-bar-visible { opacity: 1; }
 
+.kt-controls {
+  height: var(--kt-bar-h);
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  padding: 0 10px;
+  gap: 6px;
+  overflow: visible;
+}
+
 .kt-bar-left,
 .kt-bar-right {
   display: flex;
   align-items: center;
   gap: 4px;
   overflow: visible;
+}
+
+/* ── seekbar ──────────────────────────────────── */
+
+.kt-seekbar {
+  width: 100%;
+  padding: 10px 10px 4px;
+  box-sizing: border-box;
+  cursor: pointer;
+  position: relative;
+}
+
+.kt-seekbar-track {
+  position: relative;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255,255,255,0.25);
+  transition: height var(--kt-trans);
+}
+
+.kt-seekbar:hover .kt-seekbar-track {
+  height: 5px;
+}
+
+.kt-seekbar-prog {
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 100%;
+  width: 0%;
+  background: var(--kt-green);
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+.kt-seekbar-thumb {
+  position: absolute;
+  top: 50%;
+  left: 0%;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #fff;
+  transform: translate(-50%, -50%) scale(0);
+  transition: transform 0.15s ease;
+  pointer-events: none;
+}
+
+.kt-seekbar:hover .kt-seekbar-thumb {
+  transform: translate(-50%, -50%) scale(1);
+}
+
+.kt-seekbar-tip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  display: none;
+  background: rgba(18,18,18,0.9);
+  color: var(--kt-white);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 7px;
+  border-radius: 4px;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
 }
 
 /* ── buttons ─────────────────────────────────── */
@@ -156,7 +229,7 @@
 
 .kt-vol-wrap:hover .kt-vol-clip,
 .kt-vol-clip:focus-within {
-  max-width: 74px; /* 70px slider + 4px left margin */
+  max-width: 74px;
 }
 
 .kt-vol-slider {
@@ -262,6 +335,8 @@
   z-index: 99999;
   box-shadow: 0 8px 24px rgba(0,0,0,0.6);
   font-family: var(--kt-font);
+  pointer-events: all;
+  cursor: default;
 }
 
 .kt-popup[hidden] { display: none; }

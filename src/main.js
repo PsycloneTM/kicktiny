@@ -1,4 +1,6 @@
 import { initAdapter } from './adapter.js';
+import { onDvrReady } from './dvr/discovery.js';
+import { initDvrController } from './dvr/controller.js';
 import { bindKeys, togglePlay, toggleFullscreen } from './actions.js';
 import { setState } from './state.js';
 import { createBar, initBarHover } from './ui/bar.js';
@@ -82,6 +84,10 @@ async function init() {
 
     initAdapter();
     bindKeys();
+
+    onDvrReady(url => {
+      initDvrController(container, url);
+    });
 
     console.log('[KickTiny] Initialized for', getUsername() || 'unknown');
   } catch (e) {

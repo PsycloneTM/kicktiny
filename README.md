@@ -1,6 +1,6 @@
 # KickTiny
 
-A custom player overlay for Kick.com embeds. Replaces the native controls with a clean, keyboard-friendly UI while keeping the original IVS player underneath.
+Custom player overlay with DVR for Kick.com embeds. Replaces the native controls with a clean, keyboard-friendly UI while preserving the original player underneath.
 
 ## Install
 

@@ -1,7 +1,6 @@
 import { setState, state } from './state.js';
 import { loadPrefs, KEYS } from './prefs.js';
 
-// IVS event string literals — validated against Kick's embedded IVS 1.49 player
 const EV = {
   STATE_CHANGED:         'PlayerStateChanged',
   QUALITY_CHANGED:       'PlayerQualityChanged',
@@ -12,21 +11,18 @@ const EV = {
   RECOVERABLE_ERROR:     'PlayerRecoverableError',
 };
 
-// IVS PlayerState string literals
 const PS = {
   PLAYING:   'Playing',
   BUFFERING: 'Buffering',
 };
 
 let _player = null;
-let _boundPlayer = null; // guard against duplicate onPlayerReady binding
+let _boundPlayer = null;
 let _retryTimer = null;
 let _latencyTimer = null;
 const MAX_RETRIES = 40;
 const RETRY_INTERVAL = 500;
 
-// Empirically, Kick's embedded IVS player gets permanently stuck on worker
-// error codes -2 and -3. A page reload is the only reliable recovery.
 const RECONNECT_CODES = new Set([-2, -3]);
 
 export function getPlayer() { return _player; }
@@ -62,7 +58,6 @@ function extractPlayer() {
 }
 
 function walkFiberForPlayer(fiber) {
-  // Require a broader method surface to reduce false positives
   const isPlayer = v =>
     v &&
     typeof v === 'object' &&
@@ -111,14 +106,11 @@ function walkFiberForPlayer(fiber) {
 
 function onPlayerReady() {
   const p = _player;
-  // Guard against duplicate binding if extraction somehow runs twice
   if (!p || _boundPlayer === p) return;
   _boundPlayer = p;
 
-  // Load saved prefs before reading player state
   const prefs = loadPrefs();
 
-  // Sync initial state from player
   const vol = prefs.volume !== null ? prefs.volume : Math.round(p.getVolume() * 100);
   setState({
     alive: true,
@@ -132,7 +124,6 @@ function onPlayerReady() {
     rate: p.getPlaybackRate(),
   });
 
-  // Apply saved prefs to player
   if (prefs.volume !== null) p.setVolume(prefs.volume / 100);
   let qualityApplied = false;
   if (prefs.quality !== null) {
@@ -140,6 +131,7 @@ function onPlayerReady() {
   }
 
   p.addEventListener(EV.STATE_CHANGED, e => {
+    if (state.engine !== 'ivs') return;
     const ps = e?.state ?? e;
     const buffering = ps === PS.BUFFERING;
     const playing = ps === PS.PLAYING;
@@ -167,7 +159,6 @@ function onPlayerReady() {
 
     if (!state.autoQuality && savedName && q?.name !== savedName) {
       if (_reapplyAttempts >= MAX_REAPPLY) {
-        // IVS is refusing the quality — accept what it gives us and reset
         _reapplying = false;
         _reapplyAttempts = 0;
         setState({ quality: q, autoQuality: p.isAutoQualityMode() });
@@ -183,7 +174,6 @@ function onPlayerReady() {
           p.setAutoQualityMode(false);
           p.setQuality(match);
         } else {
-          // Saved quality no longer in stream — accept whatever IVS gives us
           _reapplying = false;
           _reapplyAttempts = 0;
           setState({ quality: q, autoQuality: p.isAutoQualityMode() });
@@ -198,16 +188,19 @@ function onPlayerReady() {
   });
 
   p.addEventListener(EV.VOLUME_CHANGED, e => {
+    if (state.engine !== 'ivs') return;
     const vol = typeof e === 'number' ? e : (e?.volume ?? p.getVolume());
     setState({ volume: Math.round(vol * 100) });
   });
 
   p.addEventListener(EV.MUTED_CHANGED, e => {
+    if (state.engine !== 'ivs') return;
     const muted = typeof e === 'boolean' ? e : (e?.muted ?? p.isMuted());
     setState({ muted });
   });
 
   p.addEventListener(EV.PLAYBACK_RATE_CHANGED, e => {
+    if (state.engine !== 'ivs') return;
     const rate = typeof e === 'number' ? e : (e?.playbackRate ?? p.getPlaybackRate());
     setState({ rate });
   });
@@ -237,7 +230,6 @@ function onPlayerReady() {
     setState({ fullscreen: !!document.fullscreenElement });
   });
 
-  // Retry quality pref if qualities were empty at init
   setTimeout(() => {
     const qs = p.getQualities();
     if (qs && qs.length) {
@@ -248,11 +240,9 @@ function onPlayerReady() {
     }
   }, 2000);
 
-  // Poll live edge latency every second.
-  // getDuration() = live edge position, getPosition() = current position.
-  // Guard against NaN/Infinity which IVS can return briefly during startup/buffering.
   clearInterval(_latencyTimer);
   _latencyTimer = setInterval(() => {
+    if (state.engine !== 'ivs') return;
     try {
       const latency = p.getLiveLatency?.();
       if (latency == null || !isFinite(latency)) return;

@@ -4,11 +4,17 @@ import { createQualityBtn } from './quality.js';
 import { createSpeedBtn } from './speed.js';
 import { createFullscreenBtn } from './fullscreen.js';
 import { createInfo } from './info.js';
+import { createSeekbar } from './seekbar.js';
 import { subscribe, state } from '../state.js';
 
 export function createBar() {
   const bar = document.createElement('div');
   bar.className = 'kt-bar';
+
+  const seekbar = createSeekbar();
+
+  const controls = document.createElement('div');
+  controls.className = 'kt-controls';
 
   const left = document.createElement('div');
   left.className = 'kt-bar-left';
@@ -18,7 +24,8 @@ export function createBar() {
   right.className = 'kt-bar-right';
   right.append(createSpeedBtn(), createQualityBtn(), createFullscreenBtn());
 
-  bar.append(left, right);
+  controls.append(left, right);
+  bar.append(seekbar, controls);
   return bar;
 }
 

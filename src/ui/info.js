@@ -1,6 +1,7 @@
 import { subscribe, state, setState } from '../state.js';
 import { fmtViewers, fmtUptime } from '../utils/format.js';
 import { fetchChannelInit, fetchViewerCount } from '../api.js';
+import { initDvr } from '../dvr/discovery.js';
 import { seekToLive } from '../actions.js';
 
 export function createInfo() {
@@ -23,7 +24,6 @@ export function createInfo() {
   let uptimeTimer = null;
   let startDate = null;
   let _livestreamId = null;
-
   function applyOffline() {
     live.textContent = '● OFFLINE';
     live.classList.add('kt-offline');
@@ -50,8 +50,7 @@ export function createInfo() {
     if (!state.username) return;
     const data = await fetchChannelInit(state.username);
 
-    if (data.isLive === null) return; // network error, keep current UI
-
+    if (data.isLive === null) return;
     if (data.title !== null) setState({ title: data.title });
     if (data.displayName !== null) setState({ displayName: data.displayName });
     if (data.avatar !== null) setState({ avatar: data.avatar });
@@ -60,6 +59,7 @@ export function createInfo() {
     live.classList.toggle('kt-offline', !data.isLive);
 
     if (!data.isLive) { applyOffline(); return; }
+    if (data.vodId !== null) initDvr(data.vodId);
 
     _livestreamId = data.livestreamId;
     if (data.viewers !== null) viewers.textContent = fmtViewers(data.viewers) + ' watching';
@@ -102,7 +102,7 @@ export function createInfo() {
     clearInterval(pollTimer);
     pollTimer = null;
     if (!document.hidden) {
-      initPoll(); // re-sync title/start time after tab was hidden
+      initPoll();
       pollTimer = setInterval(poll, 30_000);
     }
   });

@@ -1,5 +1,10 @@
 export const state = {
-  alive: false,
+  engine: 'ivs',
+  dvrAvailable: false,
+  dvrDuration:  0,
+  dvrPosition:  0,
+  dvrQualities: [],
+  dvrQuality:   null,
   playing: false,
   buffering: false,
   qualities: [],
