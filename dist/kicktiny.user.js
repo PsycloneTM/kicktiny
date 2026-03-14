@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KickTiny
 // @namespace    https://github.com/reda777/kicktiny
-// @version      0.0.0-dev
+// @version      0.2.0
 // @description  Custom player overlay for Kick.com embeds
 // @author       Reda777
 // @match        https://player.kick.com/*
@@ -94,8 +94,6 @@ function savePrefs(patch) {
 
 
 // ── adapter.js ──
-
-
 
 const EV = {
   STATE_CHANGED:         'PlayerStateChanged',
@@ -476,8 +474,7 @@ async function fetchDvrUrl(vodId) {
   }
 }
 
-// ── dvr\discovery.js ──
-
+// ── dvr/discovery.js ──
 
 const dvr = {
   vodId:      null,
@@ -523,7 +520,7 @@ async function initDvr(vodId) {
   notifyReady();
 }
 
-// ── dvr\controller.js ──
+// ── dvr/controller.js ──
 
 let _Hls        = null;
 let _hls        = null;
@@ -1040,7 +1037,7 @@ function bindKeys() {
   });
 }
 
-// ── ui\play.js ──
+// ── ui/play.js ──
 
 function createPlayBtn() {
   const btn = document.createElement('button');
@@ -1068,7 +1065,7 @@ function svgSpin() {
 }
 
 
-// ── ui\volume.js ──
+// ── ui/volume.js ──
 
 function createVolumeCtrl() {
   const wrap = document.createElement('div');
@@ -1122,7 +1119,7 @@ function svgVol(muted) {
 }
 
 
-// ── ui\popup.js ──
+// ── ui/popup.js ──
 let _popupGlobalsBound = false;
 function bindPopupGlobals() {
   if (_popupGlobalsBound) return;
@@ -1175,7 +1172,7 @@ function setupPopupToggle(btn, popup, onOpen) {
 }
 
 
-// ── ui\quality.js ──
+// ── ui/quality.js ──
 
 function createQualityBtn() {
   const wrap = document.createElement('div');
@@ -1271,10 +1268,7 @@ function makeItem(label, active, onClick, popup) {
   return item;
 }
 
-// ── ui\speed.js ──
-
-
-
+// ── ui/speed.js ──
 
 const RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
 
@@ -1320,7 +1314,7 @@ function createSpeedBtn() {
 }
 
 
-// ── ui\fullscreen.js ──
+// ── ui/fullscreen.js ──
 
 function createFullscreenBtn() {
   const btn = document.createElement('button');
@@ -1345,7 +1339,7 @@ function svgCompress() {
 }
 
 
-// ── utils\format.js ──
+// ── utils/format.js ──
 function fmtViewers(n) {
   if (n === null || n === undefined) return '';
   if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
@@ -1371,12 +1365,7 @@ function fmtDuration(totalSec) {
   return `${m}:${String(s).padStart(2,'0')}`;
 }
 
-// ── ui\info.js ──
-
-
-
-
-
+// ── ui/info.js ──
 
 function createInfo() {
   const wrap = document.createElement('div');
@@ -1485,10 +1474,7 @@ function createInfo() {
 }
 
 
-// ── ui\seekbar.js ──
-
-
-
+// ── ui/seekbar.js ──
 
 function createSeekbar() {
   const wrap = document.createElement('div');
@@ -1613,7 +1599,7 @@ function createSeekbar() {
   return wrap;
 }
 
-// ── ui\bar.js ──
+// ── ui/bar.js ──
 
 function createBar() {
   const bar = document.createElement('div');
@@ -1699,7 +1685,7 @@ function initBarHover(root, bar, container, topBar) {
   });
 }
 
-// ── ui\overlay.js ──
+// ── ui/overlay.js ──
 
 function createOverlay() {
   const overlay = document.createElement('div');
@@ -1720,8 +1706,7 @@ function createOverlay() {
 }
 
 
-// ── ui\topbar.js ──
-
+// ── ui/topbar.js ──
 
 function createTopBar() {
   const bar = document.createElement('div');
