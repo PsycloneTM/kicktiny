@@ -146,6 +146,7 @@ function onPlayerReady() {
   const MAX_REAPPLY = 3;
 
   p.addEventListener(EV.QUALITY_CHANGED, e => {
+    if (state.engine !== 'ivs') return;
     const q = e?.name ? e : (e?.quality ?? null);
     const qs = p.getQualities();
     if (qs && qs.length) setState({ qualities: qs });
@@ -161,7 +162,7 @@ function onPlayerReady() {
       if (_reapplyAttempts >= MAX_REAPPLY) {
         _reapplying = false;
         _reapplyAttempts = 0;
-        setState({ quality: q, autoQuality: p.isAutoQualityMode() });
+        setState({ quality: q, autoQuality: state.autoQuality });
         return;
       }
       if (!_reapplying) {
@@ -176,7 +177,7 @@ function onPlayerReady() {
         } else {
           _reapplying = false;
           _reapplyAttempts = 0;
-          setState({ quality: q, autoQuality: p.isAutoQualityMode() });
+          setState({ quality: q, autoQuality: state.autoQuality });
         }
       }
       return;
@@ -184,7 +185,10 @@ function onPlayerReady() {
 
     _reapplying = false;
     _reapplyAttempts = 0;
-    setState({ quality: q, autoQuality: p.isAutoQualityMode() });
+    // Use state.autoQuality as source of truth rather than p.isAutoQualityMode()
+    // because IVS briefly reports autoMode:true during rebuffer even when we just
+    // called setAutoQualityMode(false) — this would corrupt state.autoQuality.
+    setState({ quality: q, autoQuality: state.autoQuality });
   });
 
   p.addEventListener(EV.VOLUME_CHANGED, e => {
@@ -206,8 +210,20 @@ function onPlayerReady() {
   });
 
   p.addEventListener(EV.ERROR, err => {
+    if (state.engine !== 'ivs') return;
     setState({ error: err });
     console.error('[KickTiny] IVS Error:', err);
+
+    // Transient bad M3U8 response — try replaying before giving up
+    if (err?.type === 'ErrorInvalidData' && err?.source === 'MediaPlaylist') {
+      console.warn('[KickTiny] Bad M3U8 response — attempting recovery play()');
+      setTimeout(() => {
+        try { p.play(); } catch (_) {
+          console.warn('[KickTiny] Recovery failed — reloading page');
+          window.location.reload();
+        }
+      }, 1500);
+    }
   });
 
   p.addEventListener(EV.RECOVERABLE_ERROR, err => {
@@ -246,7 +262,7 @@ function onPlayerReady() {
     try {
       const latency = p.getLiveLatency?.();
       if (latency == null || !isFinite(latency)) return;
-      setState({ atLiveEdge: latency <= 5 });
+      setState({ atLiveEdge: latency <= 3.5 });
     } catch (_) {}
   }, 1000);
 

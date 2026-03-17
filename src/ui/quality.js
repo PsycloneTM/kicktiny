@@ -1,6 +1,7 @@
 import { setQuality } from '../actions.js';
 import { subscribe } from '../state.js';
 import { setupPopupToggle } from './popup.js';
+import { fmtQuality } from '../utils/format.js';
 
 export function createQualityBtn() {
   const wrap = document.createElement('div');
@@ -30,9 +31,9 @@ export function createQualityBtn() {
     _s = { engine, qualities, quality, autoQuality, dvrQualities, dvrQuality };
 
     if (engine === 'dvr') {
-      btn.textContent = dvrQuality ? dvrQuality.name : 'AUTO';
+      btn.textContent = dvrQuality ? fmtQuality(dvrQuality.name) : 'AUTO';
     } else {
-      btn.textContent = autoQuality ? 'AUTO' : (quality?.name ?? '?');
+      btn.textContent = autoQuality ? 'AUTO' : fmtQuality(quality?.name ?? '?');
     }
 
     if (!popup.hidden) renderPopup(popup, _s);
@@ -68,7 +69,7 @@ function buildItems(s) {
     return [
       { label: 'Auto', active: s.dvrQuality === null, onClick: () => setQuality('auto') },
       ...(s.dvrQualities || []).map(q => ({
-        label:   q.name,
+        label:   fmtQuality(q.name),
         active:  s.dvrQuality?.index === q.index,
         onClick: () => setQuality(q),
       })),

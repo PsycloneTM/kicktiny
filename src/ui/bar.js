@@ -16,9 +16,11 @@ export function createBar() {
   const controls = document.createElement('div');
   controls.className = 'kt-controls';
 
+  const { live, wrap: infoWrap } = createInfo();
+
   const left = document.createElement('div');
   left.className = 'kt-bar-left';
-  left.append(createPlayBtn(), createVolumeCtrl(), createInfo());
+  left.append(createPlayBtn(), live, createVolumeCtrl(), infoWrap);
 
   const right = document.createElement('div');
   right.className = 'kt-bar-right';
@@ -31,22 +33,25 @@ export function createBar() {
 
 export function initBarHover(root, bar, container, topBar) {
   let hideTimer = null;
+  let _lastPlaying = state.playing;
 
-  const show = () => {
+  function hide() {
+    bar.classList.remove('kt-bar-visible');
+    if (topBar) topBar.classList.remove('kt-top-bar-visible');
+    root.classList.add('kt-idle');
+    container.classList.add('kt-idle');
+  }
+
+  function show() {
     bar.classList.add('kt-bar-visible');
     if (topBar) topBar.classList.add('kt-top-bar-visible');
     root.classList.remove('kt-idle');
     container.classList.remove('kt-idle');
     clearTimeout(hideTimer);
     hideTimer = setTimeout(() => {
-      if (state.playing) {
-        bar.classList.remove('kt-bar-visible');
-        if (topBar) topBar.classList.remove('kt-top-bar-visible');
-        root.classList.add('kt-idle');
-        container.classList.add('kt-idle');
-      }
+      if (state.playing) hide();
     }, 3000);
-  };
+  }
 
   let _moveRaf = 0;
   container.addEventListener('mousemove', () => {
@@ -78,14 +83,22 @@ export function initBarHover(root, bar, container, topBar) {
     });
   }
 
+  // Only react to actual changes in playing state — not every setState call.
+  // The position poll (500ms) and uptime ticker (1s) call setState constantly,
+  // which would otherwise call show() on every tick and reset the hide timer forever.
   subscribe(({ playing }) => {
+    if (playing === _lastPlaying) return;
+    _lastPlaying = playing;
+
     if (!playing) {
+      // Paused — show bars permanently until user plays again
+      clearTimeout(hideTimer);
       bar.classList.add('kt-bar-visible');
       if (topBar) topBar.classList.add('kt-top-bar-visible');
       root.classList.remove('kt-idle');
       container.classList.remove('kt-idle');
-      clearTimeout(hideTimer);
     } else {
+      // Started playing — begin auto-hide countdown
       show();
     }
   });

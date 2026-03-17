@@ -32,23 +32,6 @@ export async function fetchChannelInit(username) {
   }
 }
 
-export async function fetchViewerCount(livestreamId) {
-  try {
-    const res = await fetch(
-      `${BASE}/current-viewers?ids[]=${encodeURIComponent(livestreamId)}`,
-      { credentials: 'omit', headers: { 'Accept': 'application/json' } },
-    );
-    if (!res.ok) throw new Error(`${res.status} /current-viewers`);
-    const data = await res.json();
-    const row = Array.isArray(data)
-      ? data.find(x => x?.livestream_id === livestreamId)
-      : null;
-    return row?.viewers ?? null;
-  } catch {
-    return null;
-  }
-}
-
 function getDeviceId() {
   const KEY = 'kt.deviceId';
   let id = localStorage.getItem(KEY);
@@ -59,7 +42,7 @@ function getDeviceId() {
   return id;
 }
 
-export async function fetchDvrUrl(vodId) {
+export async function fetchVodPlaybackUrl(vodId) {
   try {
     const res = await fetch(
       `https://web.kick.com/api/v1/stream/${encodeURIComponent(vodId)}/playback`,
@@ -98,11 +81,11 @@ export async function fetchDvrUrl(vodId) {
     );
     if (!res.ok) throw new Error(`${res.status}`);
     const data = await res.json();
-    const dvr = data?.playback_url?.dvr ?? null;
-    if (!dvr) throw new Error('dvr field missing from response');
+    const dvr = data?.playback_url?.vod ?? null;
+    if (!dvr) throw new Error('vod field missing from response');
     return dvr;
   } catch (e) {
-    console.warn('[KickTiny DVR] fetchDvrUrl failed:', e.message);
+    console.warn('[KickTiny DVR] fetchVodPlaybackUrl failed:', e.message);
     return null;
   }
 }

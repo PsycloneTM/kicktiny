@@ -1,6 +1,5 @@
 import { initAdapter } from './adapter.js';
-import { onDvrReady } from './dvr/discovery.js';
-import { initDvrController } from './dvr/controller.js';
+import { setupDvrContainer } from './dvr/controller.js';
 import { bindKeys, togglePlay, toggleFullscreen } from './actions.js';
 import { setState } from './state.js';
 import { createBar, initBarHover } from './ui/bar.js';
@@ -55,11 +54,12 @@ async function init() {
     const container = await waitForContainer();
     injectStyles(CSS);
     hideNativeControls();
-    setState({ username: getUsername() });
+    const username = getUsername();
+    setState({ username });
 
-    const root = createRoot(container);
+    const root   = createRoot(container);
     const topBar = createTopBar();
-    const bar = createBar();
+    const bar    = createBar();
 
     root.appendChild(createOverlay());
     root.appendChild(topBar);
@@ -85,11 +85,13 @@ async function init() {
     initAdapter();
     bindKeys();
 
-    onDvrReady(url => {
-      initDvrController(container, url);
+    // Pre-create the DVR video element and load hls.js in the background.
+    // No URL is fetched here — DVR init happens lazily when the user seeks.
+    setupDvrContainer(container).catch(e => {
+      console.warn('[KickTiny DVR] Container setup failed:', e.message);
     });
 
-    console.log('[KickTiny] Initialized for', getUsername() || 'unknown');
+    console.log('[KickTiny] Initialized for', username || 'unknown');
   } catch (e) {
     console.warn(e.message);
   }

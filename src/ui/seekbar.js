@@ -1,5 +1,5 @@
 import { subscribe, state } from '../state.js';
-import { dvrSeek, dvrSeekToLive, enterDvrMode } from '../dvr/controller.js';
+import { enterDvrAtBehindLive, dvrSeekToLive, dvrSeekToBehindLive } from '../dvr/controller.js';
 import { fmtDuration } from '../utils/format.js';
 
 export function createSeekbar() {
@@ -9,6 +9,7 @@ export function createSeekbar() {
   const track = document.createElement('div');
   track.className = 'kt-seekbar-track';
 
+  // Progress region
   const prog = document.createElement('div');
   prog.className = 'kt-seekbar-prog';
 
@@ -21,33 +22,47 @@ export function createSeekbar() {
   track.append(prog, thumb);
   wrap.append(track, tip);
 
-  let _dragging = false;
-  let _duration  = 0;
+  let _dragging        = false;
+  let _uptimeSec       = 0;
+  // When dragging from IVS mode, we track the target here and only
+  // trigger the async DVR entry once on mouseup (not every mousemove)
+  let _pendingBehindSec = null;
 
-  // ── rendering ─────────────────────────────────────────────────────────────
+  // ── rendering ──────────────────────────────────────────────────────────────
 
-  function render(pos, dur) {
-    if (dur <= 0) { prog.style.width = '100%'; thumb.style.left = '100%'; return; }
-    const pct = Math.min(1, pos / dur) * 100;
+  function render(uiPos, uptimeSec) {
+    if (uptimeSec <= 0) {
+      prog.style.width = '0%';
+      thumb.style.left = '0%';
+      return;
+    }
+    const pct = Math.min(1, Math.max(0, uiPos / uptimeSec)) * 100;
     prog.style.width = `${pct}%`;
     thumb.style.left = `${pct}%`;
   }
 
-  // ── tooltip ───────────────────────────────────────────────────────────────
+  // ── tooltip ────────────────────────────────────────────────────────────────
 
   function showTip(e) {
-    if (_duration <= 0) return;
-    const rect   = track.getBoundingClientRect();
-    const wRect  = wrap.getBoundingClientRect();
-    const pct    = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    const behind = _duration - pct * _duration;
+    if (_uptimeSec <= 0) return;
+    const rect  = track.getBoundingClientRect();
+    const wRect = wrap.getBoundingClientRect();
+    const pct   = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const uiPos = pct * _uptimeSec;
+    const behind = _uptimeSec - uiPos;
 
-    tip.textContent    = behind <= 3 ? 'LIVE' : '-' + fmtDuration(behind);
-    tip.style.display  = 'block';
+    tip.textContent = behind <= 30 ? 'LIVE' : '-' + fmtDuration(behind);
 
-    const tipW  = tip.offsetWidth;
-    const trackOffsetInWrap = rect.left - wRect.left;
-    let left = trackOffsetInWrap + (e.clientX - rect.left) - tipW / 2;
+    tip.style.display = 'block';
+
+    const tipW = tip.offsetWidth;
+    const tipH = tip.offsetHeight;
+    // Position tip above the track. offsetTop gives track's top edge inside wrap.
+    // We want tip's bottom edge to be 6px above the track's top edge.
+    tip.style.bottom = (wrap.offsetHeight - track.offsetTop + 6) + 'px';
+    // Horizontal: clamp within wrap width (accounting for horizontal padding)
+    const hPad = rect.left - wRect.left; // = 10px (left padding)
+    let left = hPad + (e.clientX - rect.left) - tipW / 2;
     left = Math.max(0, Math.min(wRect.width - tipW, left));
     tip.style.left = `${left}px`;
   }
@@ -56,7 +71,7 @@ export function createSeekbar() {
     if (!_dragging) tip.style.display = 'none';
   }
 
-  // ── seek logic ────────────────────────────────────────────────────────────
+  // ── seek logic ─────────────────────────────────────────────────────────────
 
   function pctFromEvent(e) {
     const rect = track.getBoundingClientRect();
@@ -64,22 +79,30 @@ export function createSeekbar() {
   }
 
   function seekFromEvent(e) {
-    if (_duration <= 0) return;
-    const target = pctFromEvent(e) * _duration;
-    const behind = _duration - target;
+    if (_uptimeSec <= 0) return;
 
-    render(target, _duration);
+    const pct              = pctFromEvent(e);
+    const uiPos     = pct * _uptimeSec;
+    const behindSec = _uptimeSec - uiPos;
 
-    if (behind <= 3) {
-      dvrSeekToLive();
-    } else if (state.engine !== 'dvr') {
-      enterDvrMode(target);
-    } else {
-      dvrSeek(target);
+    render(uiPos, _uptimeSec);
+
+    if (behindSec <= 30) {
+      if (state.engine === 'dvr') dvrSeekToLive();
+      _pendingBehindSec = null;
+      return;
     }
+
+    if (state.engine === 'dvr') {
+      dvrSeekToBehindLive(behindSec);
+      _pendingBehindSec = null;
+      return;
+    }
+
+    _pendingBehindSec = behindSec;
   }
 
-  // ── events ────────────────────────────────────────────────────────────────
+  // ── events ─────────────────────────────────────────────────────────────────
 
   wrap.addEventListener('mouseenter', e => showTip(e));
   wrap.addEventListener('mousemove',  e => showTip(e));
@@ -101,23 +124,31 @@ export function createSeekbar() {
     if (!_dragging) return;
     _dragging = false;
     tip.style.display = 'none';
+
+    // Fire DVR entry once, on release, if we dragged from IVS into the past
+    if (_pendingBehindSec !== null && state.engine !== 'dvr') {
+      const behind = _pendingBehindSec;
+      _pendingBehindSec = null;
+      enterDvrAtBehindLive(behind);
+    } else {
+      _pendingBehindSec = null;
+    }
   });
 
   // ── state subscription ────────────────────────────────────────────────────
 
-  subscribe(({ dvrAvailable, dvrDuration, dvrPosition, engine }) => {
-    const usable = dvrAvailable && dvrDuration > 0;
-    wrap.style.display = usable ? 'block' : 'none';
-    if (!usable) return;
+  subscribe(({ uptimeSec, dvrBehindLive, engine }) => {
+    wrap.style.display = uptimeSec > 0 ? 'block' : 'none';
+    if (uptimeSec <= 0) return;
 
-    _duration = dvrDuration;
+    _uptimeSec = uptimeSec;
 
     if (_dragging) return;
 
     if (engine === 'ivs') {
-      render(_duration, _duration);
+      render(uptimeSec, uptimeSec);
     } else {
-      render(dvrPosition, dvrDuration);
+      render(Math.max(0, uptimeSec - dvrBehindLive), uptimeSec);
     }
   });
 

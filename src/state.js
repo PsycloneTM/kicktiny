@@ -1,27 +1,38 @@
 export const state = {
+  // playback engine
   engine: 'ivs',
-  dvrAvailable: false,
-  dvrDuration:  0,
-  dvrPosition:  0,
-  dvrQualities: [],
-  dvrQuality:   null,
-  playing: false,
-  buffering: false,
-  qualities: [],
-  quality: null,
+
+  // DVR
+  dvrAvailable:  false,
+  uptimeSec:     0,       // total stream age in seconds (Date.now() - streamStartTime)
+  dvrBehindLive: 0,       // seconds behind live edge (seekableEnd - currentTime)
+  dvrWindowSec:  0,       // actual seekable DVR window (seekableEnd - seekableStart)
+  dvrQualities:  [],
+  dvrQuality:    null,
+
+  // stream metadata
+  vodId:           null,
+  streamStartTime: null,  // ISO string, stable source for uptime calc
+
+  // playback state
+  playing:     false,
+  buffering:   false,
+  qualities:   [],
+  quality:     null,
   autoQuality: true,
-  volume: 50,
-  muted: false,
-  fullscreen: false,
-  rate: 1,
-  atLiveEdge: true,
-  username: '',
+  volume:      50,
+  muted:       false,
+  fullscreen:  false,
+  rate:        1,
+  atLiveEdge:  true,
+
+  // channel info
+  username:    '',
   displayName: '',
-  avatar: '',
-  viewers: null,
-  uptime: null,
-  title: null,
-  error: null,
+  avatar:      '',
+  viewers:     null,
+  title:       null,
+  error:       null,
 };
 
 const listeners = new Set();

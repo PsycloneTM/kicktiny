@@ -14,6 +14,12 @@ export function fmtUptime(startDate) {
   return `${m}:${String(s).padStart(2,'0')}`;
 }
 
+export function fmtQuality(name) {
+  if (!name) return name;
+  // Remove frame rate suffix if 30fps or less (e.g. "480p30" → "480p", "1080p60" stays)
+  return name.replace(/(\d+p)(\d+)$/, (_, res, fps) => parseInt(fps) > 30 ? res + fps : res);
+}
+
 export function fmtDuration(totalSec) {
   const t = Math.max(0, Math.floor(totalSec));
   const h = Math.floor(t / 3600);

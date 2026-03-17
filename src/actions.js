@@ -1,7 +1,7 @@
 import { getPlayer } from './adapter.js';
 import { state, setState } from './state.js';
 import { savePrefs } from './prefs.js';
-import { getDvrVideo, dvrSeek, dvrSeekToLive, setDvrQuality } from './dvr/controller.js';
+import { getDvrVideo, dvrSeekToBehindLive, dvrSeekToLive, setDvrQuality, enterDvrAtBehindLive } from './dvr/controller.js';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -13,7 +13,6 @@ export function play() {
   if (inDvr()) {
     getDvrVideo()?.play().catch(() => {});
   } else {
-    if (!state.alive) return;
     getPlayer()?.play();
   }
 }
@@ -22,7 +21,6 @@ export function pause() {
   if (inDvr()) {
     getDvrVideo()?.pause();
   } else {
-    if (!state.alive) return;
     getPlayer()?.pause();
   }
 }
@@ -93,7 +91,7 @@ export function toggleMute() {
 
 export function setQuality(qualityObj) {
   if (inDvr()) {
-    setDvrQuality(qualityObj === 'auto' ? 'auto' : qualityObj.index);
+    setDvrQuality(qualityObj === 'auto' ? 'auto' : qualityObj);
     return;
   }
   const p = getPlayer();
@@ -135,7 +133,7 @@ export function seekToLive() {
   if (!p) return;
   const latency = p.getLiveLatency?.();
   if (latency == null || !isFinite(latency)) return;
-  p.seekTo(p.getPosition() + latency);
+  p.seekTo(p.getPosition() + latency + 0.25);
 }
 
 // ── fullscreen ────────────────────────────────────────────────────────────────
@@ -166,8 +164,22 @@ export function bindKeys() {
       case 'm': toggleMute(); break;
       case 'ArrowUp':    e.preventDefault(); setVolume(state.volume + 5); break;
       case 'ArrowDown':  e.preventDefault(); setVolume(state.volume - 5); break;
-      case 'ArrowLeft':  e.preventDefault(); inDvr() && dvrSeek(Math.max(0, state.dvrPosition - 10)); break;
-      case 'ArrowRight': e.preventDefault(); inDvr() && dvrSeek(state.dvrPosition + 10); break;
+      case 'ArrowLeft':
+        e.preventDefault();
+        if (inDvr()) {
+          dvrSeekToBehindLive(state.dvrBehindLive + 10);
+        } else if (state.vodId) {
+          enterDvrAtBehindLive(60);
+        }
+        break;
+      case 'ArrowRight':
+        e.preventDefault();
+        if (inDvr()) {
+          const next = Math.max(0, state.dvrBehindLive - 10);
+          if (next <= 30) seekToLive();
+          else dvrSeekToBehindLive(next);
+        }
+        break;
       case 'f': toggleFullscreen(); break;
       case 'l': seekToLive(); break;
     }
