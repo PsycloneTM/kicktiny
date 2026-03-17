@@ -1,7 +1,7 @@
 {
   "name": "kicktiny",
-  "version": "0.2.0",
-  "description": "Custom player overlay for Kick.com embeds",
+  "version": "0.3.0",
+  "description": "Custom player overlay for Kick.com embeds with DVR",
   "scripts": {
     "build": "node bundle.cjs",
     "watch": "node bundle.cjs --watch"
