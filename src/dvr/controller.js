@@ -13,10 +13,11 @@ let _refreshing      = false;
 let _manifestOffset  = 0;
 
 // Synthetic manifest state
-let _syntheticManifest = '';
-let _knownSegments     = new Set();
+let _segments          = [];
 let _targetDuration    = 10;
 let _lastSnapshotBase  = '';
+let _cachedManifest    = '';
+let _lastSegmentCount  = 0;
 
 const SYNTHETIC_URL       = 'https://kt.local/dvr.m3u8';
 const SEEKABLE_WAIT_MS    = 8  * 1000;
@@ -76,11 +77,12 @@ async function _switchDvrVariant(q) {
   console.log('[KickTiny DVR] Switching to variant:', q.name);
 
   // Rebuild synthetic manifest with new variant's segments
-  _syntheticManifest = _buildInitialManifest();
-  _knownSegments.clear();
+  _segments = [];
+  _cachedManifest = '';
   const varRes  = await fetch(variantUrl);
   const varText = await varRes.text();
   _mergeSegments(varText, variantUrl);
+  _scheduleExpiryRefresh(variantUrl);
 
   // Destroy and recreate hls.js with the new manifest, restore position
   _destroyHls();
@@ -120,35 +122,73 @@ function _loadHlsJs() {
 
 // ── synthetic manifest ────────────────────────────────────────────────────────
 
-function _buildInitialManifest() {
-  return [
+function _parseSegments(text, baseUrl) {
+  const lines  = text.split('\n');
+  const result = [];
+  let duration      = null;
+  let pdt           = null;
+  let discontinuity = false;
+
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t) continue;
+    if (t.startsWith('#EXT-X-TARGETDURATION:')) {
+      const td = parseInt(t.split(':')[1]);
+      if (td && td !== _targetDuration) {
+        _targetDuration = td;
+        _cachedManifest = ''; // Invalidate cache if target duration changes
+      }
+      continue;
+    }
+    if (t.startsWith('#EXT-X-DISCONTINUITY')) {
+      discontinuity = true;
+      continue;
+    }
+    if (t.startsWith('#EXT-X-PROGRAM-DATE-TIME:')) {
+      pdt = t;
+      continue;
+    }
+    if (t.startsWith('#EXTINF:')) {
+      duration = t;
+      continue;
+    }
+    if (duration && !t.startsWith('#')) {
+      const url = t.startsWith('http') ? t : new URL(t, baseUrl).href;
+      result.push({ duration, url, pdt, discontinuity });
+      duration      = null;
+      pdt           = null;
+      discontinuity = false;
+    }
+  }
+  return result;
+}
+
+function _generateManifestString() {
+  if (_segments.length === _lastSegmentCount && _cachedManifest) {
+    return _cachedManifest;
+  }
+
+  const header = [
     '#EXTM3U',
     '#EXT-X-VERSION:3',
     '#EXT-X-PLAYLIST-TYPE:EVENT',
     `#EXT-X-TARGETDURATION:${_targetDuration}`,
     '#EXT-X-MEDIA-SEQUENCE:0',
-  ].join('\n') + '\n';
+  ];
+  const body = [];
+  for (const seg of _segments) {
+    if (seg.discontinuity) body.push('#EXT-X-DISCONTINUITY');
+    if (seg.pdt) body.push(seg.pdt);
+    body.push(seg.duration);
+    body.push(seg.url);
+  }
+  _cachedManifest = header.join('\n') + '\n' + body.join('\n') + '\n';
+  _lastSegmentCount = _segments.length;
+  return _cachedManifest;
 }
 
-function _parseSegments(text, baseUrl) {
-  const lines  = text.split('\n');
-  const result = [];
-  let duration = null;
-  let pdt      = null;
-  for (const line of lines) {
-    const t = line.trim();
-    if (t.startsWith('#EXT-X-TARGETDURATION:')) {
-      _targetDuration = parseInt(t.split(':')[1]) || _targetDuration;
-    }
-    if (t.startsWith('#EXT-X-PROGRAM-DATE-TIME:')) { pdt = t; continue; }
-    if (t.startsWith('#EXTINF:')) { duration = t; continue; }
-    if (duration && t && !t.startsWith('#')) {
-      const url = t.startsWith('http') ? t : new URL(t, baseUrl).href;
-      result.push({ duration, url, pdt });
-      duration = null; pdt = null;
-    }
-  }
-  return result;
+function _stripQuery(url) {
+  try { return url.split('?')[0]; } catch { return url; }
 }
 
 function _pickVariantUrl(multivariantText, baseUrl) {
@@ -189,23 +229,48 @@ function _pickVariantUrl(multivariantText, baseUrl) {
 
 function _mergeSegments(text, baseUrl) {
   _lastSnapshotBase = baseUrl;
-  // Strip EXT-X-ENDLIST so our EVENT manifest stays open
-  const cleaned  = text.replace(/#EXT-X-ENDLIST.*/g, '');
-  const segments = _parseSegments(cleaned, baseUrl);
-  let appended = 0;
-  for (const seg of segments) {
-    if (_knownSegments.has(seg.url)) continue;
-    _knownSegments.add(seg.url);
-    if (seg.pdt) _syntheticManifest += seg.pdt + '\n';
-    _syntheticManifest += seg.duration + '\n';
-    _syntheticManifest += seg.url + '\n';
-    appended++;
+
+  let searchFrom = 0;
+  if (_segments.length > 0) {
+    const lastSeg = _segments[_segments.length - 1];
+    const lastUrlPath = _stripQuery(lastSeg.url);
+    const lastFilename = lastUrlPath.split('/').pop();
+    const lastIdx = text.lastIndexOf(lastFilename);
+
+    if (lastIdx !== -1) {
+      const extInfIdx = text.lastIndexOf('#EXTINF:', lastIdx);
+      if (extInfIdx !== -1) {
+        searchFrom = text.lastIndexOf('\n', extInfIdx);
+        if (searchFrom === -1) searchFrom = 0;
+      }
+    }
   }
-  if (appended > 0) {
-    console.log('[KickTiny DVR] Merged', appended, 'new segments. Tail:\n',
-      _syntheticManifest.split('\n').slice(-8).join('\n'));
+
+  const newText = searchFrom > 0 ? text.slice(searchFrom) : text;
+  const segments = _parseSegments(newText, baseUrl);
+  if (!segments.length) return 0;
+
+  let startIdx = 0;
+  if (_segments.length > 0) {
+    const lastUrlPath = _stripQuery(_segments[_segments.length - 1].url);
+    const overlapIdx = segments.map(s => _stripQuery(s.url)).lastIndexOf(lastUrlPath);
+    if (overlapIdx !== -1) {
+      startIdx = overlapIdx + 1;
+    } else {
+      console.warn('[KickTiny DVR] Overlap not found, resetting segments. Last URL path:', lastUrlPath);
+      _segments = [];
+      _cachedManifest = '';
+      startIdx = 0;
+      if (searchFrom > 0) return _mergeSegments(text, baseUrl);
+    }
   }
-  return appended;
+
+  const newSegments = segments.slice(startIdx);
+  if (newSegments.length > 0) {
+    _segments.push(...newSegments);
+    console.log('[KickTiny DVR] Merged', newSegments.length, 'new segments. Total:', _segments.length, 'Tail:', _stripQuery(newSegments[newSegments.length - 1].url).split('/').pop());
+  }
+  return newSegments.length;
 }
 
 async function _fetchAndMergeSnapshot(snapshotUrl) {
@@ -213,7 +278,6 @@ async function _fetchAndMergeSnapshot(snapshotUrl) {
     const res  = await fetch(snapshotUrl);
     const text = await res.text();
     if (text.includes('#EXT-X-STREAM-INF')) {
-      // Extract all quality levels from multivariant and expose them to the UI
       _setDvrQualitiesFromMultivariant(text);
       const playlistUrl = _pickVariantUrl(text, snapshotUrl);
       const varRes  = await fetch(playlistUrl);
@@ -256,12 +320,21 @@ function _setDvrQualitiesFromMultivariant(text) {
 async function _fetchAndExtendManifest() {
   if (_refreshing || !state.vodId) return;
   _refreshing = true;
-  console.log('[KickTiny DVR] Fetching fresh VOD URL to extend manifest');
-  const newUrl = await fetchVodPlaybackUrl(state.vodId);
-  if (newUrl) {
-    await _fetchAndMergeSnapshot(newUrl);
-    _scheduleExpiryRefresh(newUrl);
+
+  // Proactive token refresh: check if current URL is close to expiry
+  const needsRefresh = _lastSnapshotBase ? (_getTokenExpiryMs(_lastSnapshotBase) - Date.now() < EXPIRY_LEAD_MS) : true;
+
+  if (needsRefresh) {
+    console.log('[KickTiny DVR] Token expiring or missing, fetching fresh VOD URL');
+    const newUrl = await fetchVodPlaybackUrl(state.vodId);
+    if (newUrl) {
+      await _fetchAndMergeSnapshot(newUrl);
+      _scheduleExpiryRefresh(newUrl);
+    }
+  } else {
+    await _fetchAndMergeSnapshot(_lastSnapshotBase);
   }
+
   _refreshing = false;
 }
 
@@ -290,7 +363,7 @@ function _buildCustomLoader(DefaultLoader) {
   return class SyntheticLoader extends DefaultLoader {
     load(context, config, callbacks) {
       if (context.url === SYNTHETIC_URL) {
-        const data = _syntheticManifest;
+        const data = _generateManifestString();
         const now  = performance.now();
         setTimeout(() => callbacks.onSuccess(
           { data, url: SYNTHETIC_URL },
@@ -486,8 +559,7 @@ export async function enterDvrAtBehindLive(behindSec) {
     setState({ buffering: false }); return;
   }
 
-  _syntheticManifest = _buildInitialManifest();
-  _knownSegments.clear();
+  _segments = [];
   const appended = await _fetchAndMergeSnapshot(url);
   if (appended === 0) {
     console.warn('[KickTiny DVR] No segments in snapshot');

@@ -1,2 +1,3 @@
 dist/*
 !dist/kicktiny.dev-loader.user.js
+.geminiignore

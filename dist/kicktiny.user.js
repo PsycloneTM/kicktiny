@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KickTiny
 // @namespace    https://github.com/reda777/kicktiny
-// @version      0.2.0
+// @version      0.0.0-dev
 // @description  Custom player overlay for Kick.com embeds
 // @author       Reda777
 // @match        https://player.kick.com/*
@@ -105,6 +105,8 @@ function savePrefs(patch) {
 
 
 // ── adapter.js ──
+
+
 
 const EV = {
   STATE_CHANGED:         'PlayerStateChanged',
@@ -484,7 +486,10 @@ async function fetchVodPlaybackUrl(vodId) {
   }
 }
 
-// ── dvr/controller.js ──
+// ── dvr\controller.js ──
+
+
+
 
 let _Hls             = null;
 let _hls             = null;
@@ -497,10 +502,11 @@ let _refreshing      = false;
 let _manifestOffset  = 0;
 
 // Synthetic manifest state
-let _syntheticManifest = '';
-let _knownSegments     = new Set();
+let _segments          = [];
 let _targetDuration    = 10;
 let _lastSnapshotBase  = '';
+let _cachedManifest    = '';
+let _lastSegmentCount  = 0;
 
 const SYNTHETIC_URL       = 'https://kt.local/dvr.m3u8';
 const SEEKABLE_WAIT_MS    = 8  * 1000;
@@ -560,11 +566,12 @@ async function _switchDvrVariant(q) {
   console.log('[KickTiny DVR] Switching to variant:', q.name);
 
   // Rebuild synthetic manifest with new variant's segments
-  _syntheticManifest = _buildInitialManifest();
-  _knownSegments.clear();
+  _segments = [];
+  _cachedManifest = '';
   const varRes  = await fetch(variantUrl);
   const varText = await varRes.text();
   _mergeSegments(varText, variantUrl);
+  _scheduleExpiryRefresh(variantUrl);
 
   // Destroy and recreate hls.js with the new manifest, restore position
   _destroyHls();
@@ -604,35 +611,73 @@ function _loadHlsJs() {
 
 // ── synthetic manifest ────────────────────────────────────────────────────────
 
-function _buildInitialManifest() {
-  return [
+function _parseSegments(text, baseUrl) {
+  const lines  = text.split('\n');
+  const result = [];
+  let duration      = null;
+  let pdt           = null;
+  let discontinuity = false;
+
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t) continue;
+    if (t.startsWith('#EXT-X-TARGETDURATION:')) {
+      const td = parseInt(t.split(':')[1]);
+      if (td && td !== _targetDuration) {
+        _targetDuration = td;
+        _cachedManifest = ''; // Invalidate cache if target duration changes
+      }
+      continue;
+    }
+    if (t.startsWith('#EXT-X-DISCONTINUITY')) {
+      discontinuity = true;
+      continue;
+    }
+    if (t.startsWith('#EXT-X-PROGRAM-DATE-TIME:')) {
+      pdt = t;
+      continue;
+    }
+    if (t.startsWith('#EXTINF:')) {
+      duration = t;
+      continue;
+    }
+    if (duration && !t.startsWith('#')) {
+      const url = t.startsWith('http') ? t : new URL(t, baseUrl).href;
+      result.push({ duration, url, pdt, discontinuity });
+      duration      = null;
+      pdt           = null;
+      discontinuity = false;
+    }
+  }
+  return result;
+}
+
+function _generateManifestString() {
+  if (_segments.length === _lastSegmentCount && _cachedManifest) {
+    return _cachedManifest;
+  }
+
+  const header = [
     '#EXTM3U',
     '#EXT-X-VERSION:3',
     '#EXT-X-PLAYLIST-TYPE:EVENT',
     `#EXT-X-TARGETDURATION:${_targetDuration}`,
     '#EXT-X-MEDIA-SEQUENCE:0',
-  ].join('\n') + '\n';
+  ];
+  const body = [];
+  for (const seg of _segments) {
+    if (seg.discontinuity) body.push('#EXT-X-DISCONTINUITY');
+    if (seg.pdt) body.push(seg.pdt);
+    body.push(seg.duration);
+    body.push(seg.url);
+  }
+  _cachedManifest = header.join('\n') + '\n' + body.join('\n') + '\n';
+  _lastSegmentCount = _segments.length;
+  return _cachedManifest;
 }
 
-function _parseSegments(text, baseUrl) {
-  const lines  = text.split('\n');
-  const result = [];
-  let duration = null;
-  let pdt      = null;
-  for (const line of lines) {
-    const t = line.trim();
-    if (t.startsWith('#EXT-X-TARGETDURATION:')) {
-      _targetDuration = parseInt(t.split(':')[1]) || _targetDuration;
-    }
-    if (t.startsWith('#EXT-X-PROGRAM-DATE-TIME:')) { pdt = t; continue; }
-    if (t.startsWith('#EXTINF:')) { duration = t; continue; }
-    if (duration && t && !t.startsWith('#')) {
-      const url = t.startsWith('http') ? t : new URL(t, baseUrl).href;
-      result.push({ duration, url, pdt });
-      duration = null; pdt = null;
-    }
-  }
-  return result;
+function _stripQuery(url) {
+  try { return url.split('?')[0]; } catch { return url; }
 }
 
 function _pickVariantUrl(multivariantText, baseUrl) {
@@ -673,23 +718,48 @@ function _pickVariantUrl(multivariantText, baseUrl) {
 
 function _mergeSegments(text, baseUrl) {
   _lastSnapshotBase = baseUrl;
-  // Strip EXT-X-ENDLIST so our EVENT manifest stays open
-  const cleaned  = text.replace(/#EXT-X-ENDLIST.*/g, '');
-  const segments = _parseSegments(cleaned, baseUrl);
-  let appended = 0;
-  for (const seg of segments) {
-    if (_knownSegments.has(seg.url)) continue;
-    _knownSegments.add(seg.url);
-    if (seg.pdt) _syntheticManifest += seg.pdt + '\n';
-    _syntheticManifest += seg.duration + '\n';
-    _syntheticManifest += seg.url + '\n';
-    appended++;
+
+  let searchFrom = 0;
+  if (_segments.length > 0) {
+    const lastSeg = _segments[_segments.length - 1];
+    const lastUrlPath = _stripQuery(lastSeg.url);
+    const lastFilename = lastUrlPath.split('/').pop();
+    const lastIdx = text.lastIndexOf(lastFilename);
+
+    if (lastIdx !== -1) {
+      const extInfIdx = text.lastIndexOf('#EXTINF:', lastIdx);
+      if (extInfIdx !== -1) {
+        searchFrom = text.lastIndexOf('\n', extInfIdx);
+        if (searchFrom === -1) searchFrom = 0;
+      }
+    }
   }
-  if (appended > 0) {
-    console.log('[KickTiny DVR] Merged', appended, 'new segments. Tail:\n',
-      _syntheticManifest.split('\n').slice(-8).join('\n'));
+
+  const newText = searchFrom > 0 ? text.slice(searchFrom) : text;
+  const segments = _parseSegments(newText, baseUrl);
+  if (!segments.length) return 0;
+
+  let startIdx = 0;
+  if (_segments.length > 0) {
+    const lastUrlPath = _stripQuery(_segments[_segments.length - 1].url);
+    const overlapIdx = segments.map(s => _stripQuery(s.url)).lastIndexOf(lastUrlPath);
+    if (overlapIdx !== -1) {
+      startIdx = overlapIdx + 1;
+    } else {
+      console.warn('[KickTiny DVR] Overlap not found, resetting segments. Last URL path:', lastUrlPath);
+      _segments = [];
+      _cachedManifest = '';
+      startIdx = 0;
+      if (searchFrom > 0) return _mergeSegments(text, baseUrl);
+    }
   }
-  return appended;
+
+  const newSegments = segments.slice(startIdx);
+  if (newSegments.length > 0) {
+    _segments.push(...newSegments);
+    console.log('[KickTiny DVR] Merged', newSegments.length, 'new segments. Total:', _segments.length, 'Tail:', _stripQuery(newSegments[newSegments.length - 1].url).split('/').pop());
+  }
+  return newSegments.length;
 }
 
 async function _fetchAndMergeSnapshot(snapshotUrl) {
@@ -697,7 +767,6 @@ async function _fetchAndMergeSnapshot(snapshotUrl) {
     const res  = await fetch(snapshotUrl);
     const text = await res.text();
     if (text.includes('#EXT-X-STREAM-INF')) {
-      // Extract all quality levels from multivariant and expose them to the UI
       _setDvrQualitiesFromMultivariant(text);
       const playlistUrl = _pickVariantUrl(text, snapshotUrl);
       const varRes  = await fetch(playlistUrl);
@@ -740,12 +809,21 @@ function _setDvrQualitiesFromMultivariant(text) {
 async function _fetchAndExtendManifest() {
   if (_refreshing || !state.vodId) return;
   _refreshing = true;
-  console.log('[KickTiny DVR] Fetching fresh VOD URL to extend manifest');
-  const newUrl = await fetchVodPlaybackUrl(state.vodId);
-  if (newUrl) {
-    await _fetchAndMergeSnapshot(newUrl);
-    _scheduleExpiryRefresh(newUrl);
+
+  // Proactive token refresh: check if current URL is close to expiry
+  const needsRefresh = _lastSnapshotBase ? (_getTokenExpiryMs(_lastSnapshotBase) - Date.now() < EXPIRY_LEAD_MS) : true;
+
+  if (needsRefresh) {
+    console.log('[KickTiny DVR] Token expiring or missing, fetching fresh VOD URL');
+    const newUrl = await fetchVodPlaybackUrl(state.vodId);
+    if (newUrl) {
+      await _fetchAndMergeSnapshot(newUrl);
+      _scheduleExpiryRefresh(newUrl);
+    }
+  } else {
+    await _fetchAndMergeSnapshot(_lastSnapshotBase);
   }
+
   _refreshing = false;
 }
 
@@ -774,7 +852,7 @@ function _buildCustomLoader(DefaultLoader) {
   return class SyntheticLoader extends DefaultLoader {
     load(context, config, callbacks) {
       if (context.url === SYNTHETIC_URL) {
-        const data = _syntheticManifest;
+        const data = _generateManifestString();
         const now  = performance.now();
         setTimeout(() => callbacks.onSuccess(
           { data, url: SYNTHETIC_URL },
@@ -970,8 +1048,7 @@ async function enterDvrAtBehindLive(behindSec) {
     setState({ buffering: false }); return;
   }
 
-  _syntheticManifest = _buildInitialManifest();
-  _knownSegments.clear();
+  _segments = [];
   const appended = await _fetchAndMergeSnapshot(url);
   if (appended === 0) {
     console.warn('[KickTiny DVR] No segments in snapshot');
@@ -1101,6 +1178,10 @@ function _stopPositionPoll() {
 
 
 // ── actions.js ──
+
+
+
+
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -1286,7 +1367,7 @@ function bindKeys() {
 }
 
 
-// ── ui/play.js ──
+// ── ui\play.js ──
 
 function createPlayBtn() {
   const btn = document.createElement('button');
@@ -1314,7 +1395,9 @@ function svgSpin() {
 }
 
 
-// ── ui/volume.js ──
+// ── ui\volume.js ──
+
+
 
 function createVolumeCtrl() {
   const wrap = document.createElement('div');
@@ -1368,7 +1451,7 @@ function svgVol(muted) {
 }
 
 
-// ── ui/popup.js ──
+// ── ui\popup.js ──
 let _popupGlobalsBound = false;
 function bindPopupGlobals() {
   if (_popupGlobalsBound) return;
@@ -1421,7 +1504,7 @@ function setupPopupToggle(btn, popup, onOpen) {
 }
 
 
-// ── utils/format.js ──
+// ── utils\format.js ──
 function fmtViewers(n) {
   if (n === null || n === undefined) return '';
   if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
@@ -1453,7 +1536,11 @@ function fmtDuration(totalSec) {
   return `${m}:${String(s).padStart(2,'0')}`;
 }
 
-// ── ui/quality.js ──
+// ── ui\quality.js ──
+
+
+
+
 
 function createQualityBtn() {
   const wrap = document.createElement('div');
@@ -1549,7 +1636,10 @@ function makeItem(label, active, onClick, popup) {
   return item;
 }
 
-// ── ui/speed.js ──
+// ── ui\speed.js ──
+
+
+
 
 const RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
 
@@ -1595,7 +1685,7 @@ function createSpeedBtn() {
 }
 
 
-// ── ui/fullscreen.js ──
+// ── ui\fullscreen.js ──
 
 function createFullscreenBtn() {
   const btn = document.createElement('button');
@@ -1620,7 +1710,7 @@ function svgCompress() {
 }
 
 
-// ── ui/info.js ──
+// ── ui\info.js ──
 
 // ── intercept Kick's own current-viewers fetch ────────────────────────────────
 // Instead of making our own viewer count requests, we sniff Kick's native fetch
@@ -1680,7 +1770,13 @@ function createInfo() {
     clearInterval(uptimeTimer);
 
     const tick = () => {
-      uptime.textContent = fmtUptime(startDate);
+      if (state.engine === 'dvr') {
+        // In DVR mode: show elapsed from stream start to current playback position
+        const posSec = Math.max(0, state.uptimeSec - state.dvrBehindLive);
+        uptime.textContent = fmtDuration(posSec);
+      } else {
+        uptime.textContent = fmtUptime(startDate);
+      }
       setState({ uptimeSec: Math.floor((Date.now() - startDate.getTime()) / 1000) });
     };
 
@@ -1771,10 +1867,20 @@ function createInfo() {
 
   // ── subscriptions ──────────────────────────────────────────────────────────
 
-  subscribe(({ username, atLiveEdge }) => {
+  subscribe(({ username, atLiveEdge, engine, dvrBehindLive, uptimeSec }) => {
     live.classList.toggle('kt-behind', !atLiveEdge);
     live.title = atLiveEdge ? '' : 'Jump to live';
     if (username && !pollTimer) _startPolling();
+
+    // Update uptime display immediately on engine switch or DVR position change
+    if (startDate) {
+      if (engine === 'dvr') {
+        const posSec = Math.max(0, uptimeSec - dvrBehindLive);
+        uptime.textContent = fmtDuration(posSec);
+      } else {
+        uptime.textContent = fmtUptime(startDate);
+      }
+    }
   });
 
   document.addEventListener('visibilitychange', () => {
@@ -1795,7 +1901,11 @@ function createInfo() {
   return { live, wrap };
 }
 
-// ── ui/seekbar.js ──
+
+// ── ui\seekbar.js ──
+
+
+
 
 function createSeekbar() {
   const wrap = document.createElement('div');
@@ -1951,7 +2061,15 @@ function createSeekbar() {
   return wrap;
 }
 
-// ── ui/bar.js ──
+// ── ui\bar.js ──
+
+
+
+
+
+
+
+
 
 function createBar() {
   const bar = document.createElement('div');
@@ -2050,7 +2168,7 @@ function initBarHover(root, bar, container, topBar) {
   });
 }
 
-// ── ui/overlay.js ──
+// ── ui\overlay.js ──
 
 function createOverlay() {
   const overlay = document.createElement('div');
@@ -2071,7 +2189,8 @@ function createOverlay() {
 }
 
 
-// ── ui/topbar.js ──
+// ── ui\topbar.js ──
+
 
 function createTopBar() {
   const bar = document.createElement('div');
@@ -2119,6 +2238,13 @@ function createTopBar() {
 
 
 // ── main.js ──
+
+
+
+
+
+
+
 
 const CSS = `:root{--kt-black:#0d0d0d;--kt-white:#f0f0f0;--kt-green:#4fc724;--kt-dim:rgba(255,255,255,0.55);--kt-bar-h:48px;--kt-radius:5px;--kt-font:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;--kt-size:13px;--kt-trans:0.2s ease}#kt-root{position:absolute;inset:0;z-index:9999;pointer-events:none;font-family:var(--kt-font);font-size:var(--kt-size);color:var(--kt-white);user-select:none;-webkit-user-select:none}#kt-root.kt-idle{cursor:none}.kt-idle,.kt-idle *{cursor:none !important}.kt-top-bar{position:absolute;top:0;left:0;right:0;padding:10px 14px;display:flex;flex-direction:column;gap:2px;background:linear-gradient(to bottom,rgba(0,0,0,0.85) 0%,rgba(0,0,0,0.5) 60%,transparent 100%);pointer-events:all;opacity:0;transition:opacity var(--kt-trans)}.kt-top-bar-visible{opacity:1}.kt-channel-wrap{display:flex;align-items:center;gap:8px}.kt-avatar{width:28px;height:28px;border-radius:50%;object-fit:cover;flex-shrink:0;border:1.5px solid rgba(255,255,255,0.2)}.kt-channel-link{font-size:15px;font-weight:700;color:var(--kt-white);text-decoration:none;line-height:1.2;pointer-events:auto}.kt-channel-link:hover{color:var(--kt-green)}.kt-stream-title{font-size:13px;color:var(--kt-white);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.4;padding-bottom:2px}.kt-bar{position:absolute;bottom:0;left:0;right:0;display:flex;flex-direction:column;padding:0;gap:0;background:linear-gradient(to top,rgba(0,0,0,0.75) 0%,transparent 100%);pointer-events:all;opacity:0;transition:opacity var(--kt-trans);overflow:visible}.kt-bar-visible{opacity:1}.kt-controls{height:var(--kt-bar-h);display:flex;align-items:stretch;justify-content:space-between;padding:0 10px;gap:6px;overflow:visible}.kt-bar-left,.kt-bar-right{display:flex;align-items:center;gap:4px;overflow:visible}.kt-seekbar{width:100%;padding:10px 10px 4px;box-sizing:border-box;cursor:pointer;position:relative}.kt-seekbar-track{position:relative;height:3px;border-radius:2px;background:rgba(255,255,255,0.25);transition:height var(--kt-trans)}.kt-seekbar:hover .kt-seekbar-track{height:5px}.kt-seekbar-unavail{position:absolute;right:0;left:auto;top:0;height:100%;width:0%;border-radius:0 2px 2px 0;pointer-events:none;z-index:0;background:repeating-linear-gradient( -45deg,rgba(255,255,255,0.08) 0px,rgba(255,255,255,0.08) 3px,rgba(255,255,255,0.03) 3px,rgba(255,255,255,0.03) 6px )}.kt-seekbar-prog{position:absolute;left:0;top:0;height:100%;width:0%;background:var(--kt-green);border-radius:2px;pointer-events:none;z-index:1}.kt-seekbar-thumb{position:absolute;top:50%;left:0%;width:13px;height:13px;border-radius:50%;background:#fff;transform:translate(-50%,-50%) scale(0);transition:transform 0.15s ease;pointer-events:none;z-index:2}.kt-seekbar:hover .kt-seekbar-thumb{transform:translate(-50%,-50%) scale(1)}.kt-seekbar-tip{position:absolute;display:none;background:rgba(18,18,18,0.9);color:var(--kt-white);font-size:11px;font-weight:600;padding:3px 7px;border-radius:4px;white-space:nowrap;pointer-events:none;user-select:none}.kt-seekbar-tip.kt-tip-unavail{opacity:0.6;background:rgba(18,18,18,0.7)}.kt-btn:focus-visible,.kt-popup-item:focus-visible,.kt-channel-link:focus-visible,.kt-overlay-btn:focus-visible{outline:2px solid var(--kt-green);outline-offset:2px}.kt-btn{background:none;border:none;padding:0 8px;height:32px;min-width:32px;align-self:center;cursor:pointer;color:var(--kt-white);display:flex;align-items:center;justify-content:center;border-radius:var(--kt-radius);transition:color var(--kt-trans),background var(--kt-trans);line-height:0}.kt-btn:hover{color:var(--kt-green);background:rgba(255,255,255,0.08)}.kt-btn svg{width:20px;height:20px}@keyframes kt-spin{to{transform:rotate(360deg)}}.kt-spin{animation:kt-spin 0.8s linear infinite}.kt-vol-wrap{display:flex;align-items:center;align-self:center;height:32px;gap:4px}.kt-vol-clip{display:flex;align-items:center;align-self:stretch;overflow:hidden;max-width:0;transition:max-width var(--kt-trans)}.kt-vol-wrap:hover .kt-vol-clip,.kt-vol-clip:focus-within{max-width:74px}.kt-vol-slider{-webkit-appearance:none;appearance:none;width:70px;flex-shrink:0;margin-left:4px;height:20px;padding:0;border-radius:2px;background:transparent;outline:none;cursor:pointer;display:block}.kt-vol-slider::-webkit-slider-runnable-track{height:3px;border-radius:2px;background:rgba(255,255,255,0.3)}.kt-vol-slider::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;margin-top:-4.5px;border-radius:50%;background:var(--kt-green);cursor:pointer}.kt-vol-slider::-moz-range-thumb{width:12px;height:12px;border-radius:50%;background:var(--kt-green);cursor:pointer;border:none}.kt-vol-slider::-moz-range-track{height:3px;border-radius:2px;background:rgba(255,255,255,0.3)}.kt-vol-slider::-moz-range-progress{height:3px;border-radius:2px;background:var(--kt-green)}.kt-info{display:flex;align-items:center;align-self:center;gap:8px;padding:0 6px;height:32px}.kt-live-badge{background:#b30906;color:#fff;font-size:10px;font-weight:600;letter-spacing:0.05em;padding:0 10px;height:22px;display:inline-flex;align-items:center;justify-content:center;border-radius:var(--kt-radius);line-height:1;transition:background var(--kt-trans)}.kt-live-badge.kt-offline{background:#555}.kt-live-badge.kt-behind{background:#555;cursor:pointer}.kt-live-badge.kt-behind:hover{background:#eb0400}.kt-viewers,.kt-uptime{color:var(--kt-dim);font-size:12px;white-space:nowrap;line-height:1}.kt-popup-wrap{position:relative;align-self:stretch;display:flex;align-items:center}.kt-popup{position:fixed;min-width:120px;overflow-y:auto;background:rgba(18,18,18,0.97);border:1px solid rgba(255,255,255,0.12);border-radius:10px;padding:6px;z-index:99999;box-shadow:0 8px 24px rgba(0,0,0,0.6);font-family:var(--kt-font);pointer-events:all;cursor:default}.kt-popup[hidden]{display:none}.kt-popup-item{display:block;width:100%;padding:7px 12px;text-align:left;background:none;border:none;color:var(--kt-white);font-size:var(--kt-size);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;cursor:pointer;white-space:nowrap;border-radius:6px;transition:color 0.2s ease,background 0.2s ease}.kt-popup-item:hover{color:var(--kt-white);background:rgba(255,255,255,0.1)}.kt-popup-item.kt-active{color:var(--kt-green)}.kt-qual-btn,.kt-speed-btn{font-size:12px;font-weight:600;padding:0 10px;height:28px;min-width:unset;letter-spacing:0.02em}.kt-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;transition:opacity var(--kt-trans)}.kt-overlay-hidden{opacity:0}.kt-overlay-btn{pointer-events:auto;background:rgba(0,0,0,0.5);border:none;border-radius:50%;width:60px;height:60px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--kt-white);transition:transform var(--kt-trans),background var(--kt-trans)}.kt-overlay-hidden .kt-overlay-btn{pointer-events:none}.kt-overlay-btn:hover{transform:scale(1.1);background:rgba(83,252,24,0.25);color:var(--kt-green)}.kt-overlay-btn svg{width:32px;height:32px}`;
 

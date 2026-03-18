@@ -1,5 +1,5 @@
 import { subscribe, state, setState } from '../state.js';
-import { fmtViewers, fmtUptime } from '../utils/format.js';
+import { fmtViewers, fmtUptime, fmtDuration } from '../utils/format.js';
 import { fetchChannelInit } from '../api.js';
 import { seekToLive } from '../actions.js';
 
@@ -61,7 +61,13 @@ export function createInfo() {
     clearInterval(uptimeTimer);
 
     const tick = () => {
-      uptime.textContent = fmtUptime(startDate);
+      if (state.engine === 'dvr') {
+        // In DVR mode: show elapsed from stream start to current playback position
+        const posSec = Math.max(0, state.uptimeSec - state.dvrBehindLive);
+        uptime.textContent = fmtDuration(posSec);
+      } else {
+        uptime.textContent = fmtUptime(startDate);
+      }
       setState({ uptimeSec: Math.floor((Date.now() - startDate.getTime()) / 1000) });
     };
 
@@ -152,10 +158,20 @@ export function createInfo() {
 
   // ── subscriptions ──────────────────────────────────────────────────────────
 
-  subscribe(({ username, atLiveEdge }) => {
+  subscribe(({ username, atLiveEdge, engine, dvrBehindLive, uptimeSec }) => {
     live.classList.toggle('kt-behind', !atLiveEdge);
     live.title = atLiveEdge ? '' : 'Jump to live';
     if (username && !pollTimer) _startPolling();
+
+    // Update uptime display immediately on engine switch or DVR position change
+    if (startDate) {
+      if (engine === 'dvr') {
+        const posSec = Math.max(0, uptimeSec - dvrBehindLive);
+        uptime.textContent = fmtDuration(posSec);
+      } else {
+        uptime.textContent = fmtUptime(startDate);
+      }
+    }
   });
 
   document.addEventListener('visibilitychange', () => {
