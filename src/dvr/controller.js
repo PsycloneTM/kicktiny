@@ -2,29 +2,29 @@ import { state, setState } from '../state.js';
 import { getPlayer } from '../adapter.js';
 import { fetchVodPlaybackUrl } from '../api.js';
 
-let _Hls             = null;
-let _hls             = null;
-let _dvrVideo        = null;
-let _nativeVideo     = null;
-let _posTimer        = null;
-let _expiryTimer     = null;
-let _catchUpTimer    = null;   // active when within 60s of end of loaded segments
-let _refreshing      = false;
-let _manifestOffset  = 0;
+let _Hls          = null;
+let _hls          = null;
+let _dvrVideo     = null;
+let _nativeVideo  = null;
+let _posTimer     = null;
+let _expiryTimer  = null;
+let _catchUpTimer = null;
+let _refreshing   = false;
+let _manifestOffset = 0;
 
-// Synthetic manifest state
-let _segments          = [];
-let _targetDuration    = 10;
-let _lastSnapshotBase  = '';
-let _cachedManifest    = '';
-let _lastSegmentCount  = 0;
+// Segments array — replaces growing string for O(1) append and clean generation
+// Each entry: { duration, url, pdt, discontinuity }
+let _segments      = [];
+let _lastSegUrl    = '';    // last known segment URL for overlap detection
+let _targetDuration = 10;
+let _lastSnapshotBase = '';
 
 const SYNTHETIC_URL       = 'https://kt.local/dvr.m3u8';
 const SEEKABLE_WAIT_MS    = 8  * 1000;
 const EXPIRY_LEAD_MS      = 2  * 60 * 1000;
 const FALLBACK_REFRESH_MS = 50 * 60 * 1000;
-const CATCH_UP_INTERVAL   = 12500;  // ~one segment duration
-const NEAR_END_THRESHOLD  = 60;     // seconds from end of manifest
+const CATCH_UP_INTERVAL   = 12500;
+const NEAR_END_THRESHOLD  = 60;
 
 export function getDvrVideo() { return _dvrVideo; }
 
@@ -33,7 +33,6 @@ export function getDvrVideo() { return _dvrVideo; }
 export function setDvrQuality(index) {
   if (!_hls) return;
   if (index === 'auto') {
-    // Pick middle quality
     const qualities = [...(state.dvrQualities || [])];
     const mid = qualities[Math.floor(qualities.length / 2)];
     if (mid) _switchDvrVariant(mid);
@@ -41,7 +40,6 @@ export function setDvrQuality(index) {
   } else {
     const q = typeof index === 'object' ? index : state.dvrQualities?.find(q => q.index === index);
     if (q) _switchDvrVariant(q);
-    setState({ dvrQuality: q ?? null });
   }
 }
 
@@ -49,7 +47,6 @@ async function _switchDvrVariant(q) {
   if (!state.vodId) return;
   const savedPos = _dvrVideo?.currentTime ?? 0;
 
-  // Fetch fresh VOD URL to get a new multivariant playlist
   const vodUrl = await fetchVodPlaybackUrl(state.vodId);
   if (!vodUrl) return;
 
@@ -57,7 +54,6 @@ async function _switchDvrVariant(q) {
   const text = await res.text();
   if (!text.includes('#EXT-X-STREAM-INF')) return;
 
-  // Find the variant URL matching this quality by name
   const lines = text.split('\n');
   let variantUrl = null;
   for (let i = 0; i < lines.length; i++) {
@@ -76,25 +72,26 @@ async function _switchDvrVariant(q) {
 
   console.log('[KickTiny DVR] Switching to variant:', q.name);
 
-  // Rebuild synthetic manifest with new variant's segments
+  // Reset segments and rebuild from the new variant
   _segments = [];
-  _cachedManifest = '';
+  _lastSegUrl = '';
   const varRes  = await fetch(variantUrl);
   const varText = await varRes.text();
   _mergeSegments(varText, variantUrl);
-  _scheduleExpiryRefresh(variantUrl);
 
-  // Destroy and recreate hls.js with the new manifest, restore position
+  // Reschedule expiry for the new URL
+  _scheduleExpiryRefresh(vodUrl);
+
   _destroyHls();
   _createHlsInstance();
-  if (isFinite(savedPos) && savedPos > 0) {
-    const onMeta = () => {
-      _dvrVideo.currentTime = savedPos;
-      _dvrVideo.play().catch(() => {});
-    };
-    if (_dvrVideo.readyState >= 1) onMeta();
-    else _dvrVideo.addEventListener('loadedmetadata', onMeta, { once: true });
-  }
+
+  const onReady = () => {
+    _dvrVideo.currentTime = savedPos;
+    _dvrVideo.play().catch(() => {});
+  };
+  if (_dvrVideo.readyState >= 1) onReady();
+  else _dvrVideo.addEventListener('loadedmetadata', onReady, { once: true });
+
   setState({ dvrQuality: q });
 }
 
@@ -122,73 +119,50 @@ function _loadHlsJs() {
 
 // ── synthetic manifest ────────────────────────────────────────────────────────
 
-function _parseSegments(text, baseUrl) {
-  const lines  = text.split('\n');
-  const result = [];
-  let duration      = null;
-  let pdt           = null;
-  let discontinuity = false;
-
-  for (const line of lines) {
-    const t = line.trim();
-    if (!t) continue;
-    if (t.startsWith('#EXT-X-TARGETDURATION:')) {
-      const td = parseInt(t.split(':')[1]);
-      if (td && td !== _targetDuration) {
-        _targetDuration = td;
-        _cachedManifest = ''; // Invalidate cache if target duration changes
-      }
-      continue;
-    }
-    if (t.startsWith('#EXT-X-DISCONTINUITY')) {
-      discontinuity = true;
-      continue;
-    }
-    if (t.startsWith('#EXT-X-PROGRAM-DATE-TIME:')) {
-      pdt = t;
-      continue;
-    }
-    if (t.startsWith('#EXTINF:')) {
-      duration = t;
-      continue;
-    }
-    if (duration && !t.startsWith('#')) {
-      const url = t.startsWith('http') ? t : new URL(t, baseUrl).href;
-      result.push({ duration, url, pdt, discontinuity });
-      duration      = null;
-      pdt           = null;
-      discontinuity = false;
-    }
-  }
-  return result;
-}
-
-function _generateManifestString() {
-  if (_segments.length === _lastSegmentCount && _cachedManifest) {
-    return _cachedManifest;
-  }
-
-  const header = [
+function _buildManifestHeader() {
+  return [
     '#EXTM3U',
     '#EXT-X-VERSION:3',
     '#EXT-X-PLAYLIST-TYPE:EVENT',
     `#EXT-X-TARGETDURATION:${_targetDuration}`,
     '#EXT-X-MEDIA-SEQUENCE:0',
-  ];
-  const body = [];
-  for (const seg of _segments) {
-    if (seg.discontinuity) body.push('#EXT-X-DISCONTINUITY');
-    if (seg.pdt) body.push(seg.pdt);
-    body.push(seg.duration);
-    body.push(seg.url);
-  }
-  _cachedManifest = header.join('\n') + '\n' + body.join('\n') + '\n';
-  _lastSegmentCount = _segments.length;
-  return _cachedManifest;
+  ].join('\n') + '\n';
 }
 
-function _stripQuery(url) {
-  try { return url.split('?')[0]; } catch { return url; }
+function _generateManifestString() {
+  let out = _buildManifestHeader();
+  for (const seg of _segments) {
+    if (seg.discontinuity) out += '#EXT-X-DISCONTINUITY\n';
+    if (seg.pdt)            out += seg.pdt + '\n';
+    out += seg.duration + '\n';
+    out += seg.url + '\n';
+  }
+  return out;
+}
+
+function _parseSegments(text, baseUrl) {
+  const lines  = text.split('\n');
+  const result = [];
+  let duration     = null;
+  let pdt          = null;
+  let discontinuity = false;
+
+  for (const line of lines) {
+    const t = line.trim();
+    if (t.startsWith('#EXT-X-TARGETDURATION:')) {
+      _targetDuration = parseInt(t.split(':')[1]) || _targetDuration;
+      continue;
+    }
+    if (t === '#EXT-X-DISCONTINUITY') { discontinuity = true; continue; }
+    if (t.startsWith('#EXT-X-PROGRAM-DATE-TIME:')) { pdt = t; continue; }
+    if (t.startsWith('#EXTINF:')) { duration = t; continue; }
+    if (duration && t && !t.startsWith('#')) {
+      const url = t.startsWith('http') ? t : new URL(t, baseUrl).href;
+      result.push({ duration, url, pdt, discontinuity });
+      duration = null; pdt = null; discontinuity = false;
+    }
+  }
+  return result;
 }
 
 function _pickVariantUrl(multivariantText, baseUrl) {
@@ -230,47 +204,57 @@ function _pickVariantUrl(multivariantText, baseUrl) {
 function _mergeSegments(text, baseUrl) {
   _lastSnapshotBase = baseUrl;
 
-  let searchFrom = 0;
-  if (_segments.length > 0) {
-    const lastSeg = _segments[_segments.length - 1];
-    const lastUrlPath = _stripQuery(lastSeg.url);
-    const lastFilename = lastUrlPath.split('/').pop();
-    const lastIdx = text.lastIndexOf(lastFilename);
+  // Strip EXT-X-ENDLIST so our EVENT manifest stays open
+  const cleaned  = text.replace(/#EXT-X-ENDLIST.*/g, '');
+  const incoming = _parseSegments(cleaned, baseUrl);
+  if (!incoming.length) return 0;
 
-    if (lastIdx !== -1) {
-      const extInfIdx = text.lastIndexOf('#EXTINF:', lastIdx);
-      if (extInfIdx !== -1) {
-        searchFrom = text.lastIndexOf('\n', extInfIdx);
-        if (searchFrom === -1) searchFrom = 0;
-      }
-    }
-  }
-
-  const newText = searchFrom > 0 ? text.slice(searchFrom) : text;
-  const segments = _parseSegments(newText, baseUrl);
-  if (!segments.length) return 0;
-
+  // Overlap detection: find where incoming picks up from our last known segment
+  // This is O(1) amortized — scan from the end of incoming for the last known URL
   let startIdx = 0;
-  if (_segments.length > 0) {
-    const lastUrlPath = _stripQuery(_segments[_segments.length - 1].url);
-    const overlapIdx = segments.map(s => _stripQuery(s.url)).lastIndexOf(lastUrlPath);
-    if (overlapIdx !== -1) {
-      startIdx = overlapIdx + 1;
+  if (_lastSegUrl) {
+    const overlapIdx = incoming.findLastIndex(s => s.url === _lastSegUrl);
+    if (overlapIdx >= 0) {
+      startIdx = overlapIdx + 1; // append only what's new
     } else {
-      console.warn('[KickTiny DVR] Overlap not found, resetting segments. Last URL path:', lastUrlPath);
-      _segments = [];
-      _cachedManifest = '';
+      // No overlap found — incoming is completely new (e.g. quality switch)
+      // Keep existing segments, append all incoming
       startIdx = 0;
-      if (searchFrom > 0) return _mergeSegments(text, baseUrl);
     }
   }
 
-  const newSegments = segments.slice(startIdx);
-  if (newSegments.length > 0) {
-    _segments.push(...newSegments);
-    console.log('[KickTiny DVR] Merged', newSegments.length, 'new segments. Total:', _segments.length, 'Tail:', _stripQuery(newSegments[newSegments.length - 1].url).split('/').pop());
+  const newSegs = incoming.slice(startIdx);
+  if (!newSegs.length) return 0;
+
+  _segments.push(...newSegs);
+  _lastSegUrl = _segments[_segments.length - 1].url;
+
+  console.log('[KickTiny DVR] Merged', newSegs.length, 'new segments, total:', _segments.length,
+    '\n  tail:', _lastSegUrl.split('/').slice(-1)[0]);
+  return newSegs.length;
+}
+
+function _setDvrQualitiesFromMultivariant(text) {
+  const lines   = text.split('\n');
+  const streams = [];
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (!t.startsWith('#EXT-X-STREAM-INF')) continue;
+    const nameMatch = t.match(/VIDEO="([^"]+)"/);
+    const bwMatch   = t.match(/BANDWIDTH=(\d+)/);
+    if (nameMatch) {
+      streams.push({
+        name:      nameMatch[1],
+        index:     streams.length,
+        bandwidth: bwMatch ? parseInt(bwMatch[1]) : 0,
+      });
+    }
   }
-  return newSegments.length;
+  if (streams.length) {
+    streams.sort((a, b) => b.bandwidth - a.bandwidth);
+    streams.forEach((s, i) => { s.index = i; });
+    setState({ dvrQualities: streams });
+  }
 }
 
 async function _fetchAndMergeSnapshot(snapshotUrl) {
@@ -291,62 +275,66 @@ async function _fetchAndMergeSnapshot(snapshotUrl) {
   }
 }
 
-function _setDvrQualitiesFromMultivariant(text) {
-  const lines   = text.split('\n');
-  const streams = [];
-  for (let i = 0; i < lines.length; i++) {
-    const t = lines[i].trim();
-    if (!t.startsWith('#EXT-X-STREAM-INF')) continue;
-    const nameMatch = t.match(/VIDEO="([^"]+)"/);
-    const bwMatch   = t.match(/BANDWIDTH=(\d+)/);
-    if (nameMatch) {
-      streams.push({
-        name:      nameMatch[1],
-        index:     streams.length,
-        bandwidth: bwMatch ? parseInt(bwMatch[1]) : 0,
-      });
+// ── segment extrapolation ─────────────────────────────────────────────────────
+// The .ts URL pattern is predictable: only the segment number changes.
+// PDT increments by _targetDuration seconds per segment.
+// Add one segment at a time — called when we're near the end of loaded segments.
+
+function _extrapolateNextSegment() {
+  if (!_segments.length) return false;
+
+  const last  = _segments[_segments.length - 1];
+  const match = last.url.match(/^(.*\/)(\d+)\.ts$/);
+  if (!match) {
+    console.warn('[KickTiny DVR] Cannot extrapolate — URL pattern not recognized');
+    return false;
+  }
+
+  const url = `${match[1]}${parseInt(match[2]) + 1}.ts`;
+
+  // Compute next PDT from last one
+  let pdt = null;
+  if (last.pdt) {
+    const pdtMatch = last.pdt.match(/^#EXT-X-PROGRAM-DATE-TIME:(.+)$/);
+    if (pdtMatch) {
+      const nextMs = new Date(pdtMatch[1]).getTime() + _targetDuration * 1000;
+      pdt = `#EXT-X-PROGRAM-DATE-TIME:${new Date(nextMs).toISOString()}`;
     }
   }
-  if (streams.length) {
-    // Sort highest quality first (matches IVS quality list order)
-    streams.sort((a, b) => b.bandwidth - a.bandwidth);
-    streams.forEach((s, i) => { s.index = i; });
-    setState({ dvrQualities: streams });
-  }
+
+  _segments.push({ duration: last.duration, url, pdt, discontinuity: false });
+  _lastSegUrl = url;
+  console.log('[KickTiny DVR] Extrapolated next segment:', url.split('/').slice(-1)[0]);
+  return true;
 }
 
-// ── extend manifest (fetch fresh VOD JWT + merge new segments) ────────────────
+// ── extend manifest (fetch fresh VOD JWT) — only called by expiry timer ────────
 
 async function _fetchAndExtendManifest() {
   if (_refreshing || !state.vodId) return;
   _refreshing = true;
-
-  // Proactive token refresh: check if current URL is close to expiry
-  const needsRefresh = _lastSnapshotBase ? (_getTokenExpiryMs(_lastSnapshotBase) - Date.now() < EXPIRY_LEAD_MS) : true;
-
-  if (needsRefresh) {
-    console.log('[KickTiny DVR] Token expiring or missing, fetching fresh VOD URL');
-    const newUrl = await fetchVodPlaybackUrl(state.vodId);
-    if (newUrl) {
-      await _fetchAndMergeSnapshot(newUrl);
-      _scheduleExpiryRefresh(newUrl);
-    }
-  } else {
-    await _fetchAndMergeSnapshot(_lastSnapshotBase);
+  console.log('[KickTiny DVR] Fetching fresh VOD URL (expiry refresh)');
+  const newUrl = await fetchVodPlaybackUrl(state.vodId);
+  if (newUrl) {
+    await _fetchAndMergeSnapshot(newUrl);
+    _scheduleExpiryRefresh(newUrl);
   }
-
   _refreshing = false;
 }
 
-// ── catch-up timer (runs only when within 60s of end of loaded segments) ──────
+// ── catch-up timer ────────────────────────────────────────────────────────────
+// Uses segment extrapolation — zero network requests during normal catch-up
 
 function _startCatchUpTimer() {
   if (_catchUpTimer) return;
-  console.log('[KickTiny DVR] Entering catch-up mode');
-  _fetchAndExtendManifest(); // immediate fetch on entry
+  console.log('[KickTiny DVR] Entering catch-up mode (extrapolation)');
+  _extrapolateNextSegment();
   _catchUpTimer = setInterval(() => {
     if (state.engine !== 'dvr') { _stopCatchUpTimer(); return; }
-    _fetchAndExtendManifest();
+    const win = _getSeekableWindow();
+    if (win && (win.end - _dvrVideo.currentTime) < NEAR_END_THRESHOLD) {
+      _extrapolateNextSegment();
+    }
   }, CATCH_UP_INTERVAL);
 }
 
@@ -401,7 +389,7 @@ function _createHlsInstance() {
   _hls.loadSource(SYNTHETIC_URL);
   _hls.attachMedia(_dvrVideo);
   _hls.on(_Hls.Events.MANIFEST_PARSED, (_, data) => {
-    console.log('[KickTiny DVR] Manifest parsed —', data.levels.length, 'level(s)');
+    console.log('[KickTiny DVR] Manifest parsed —', data.levels.length, 'level(s),', _segments.length, 'segments');
     setState({ dvrAvailable: true });
   });
   _hls.on(_Hls.Events.ERROR, (_, data) => {
@@ -418,7 +406,7 @@ async function _waitForSeekable(timeoutMs = SEEKABLE_WAIT_MS) {
   while (Date.now() - started < timeoutMs) {
     if (_dvrVideo?.seekable?.length > 0) {
       const i = _dvrVideo.seekable.length - 1;
-      const end = _dvrVideo.seekable.end(i);
+      const end   = _dvrVideo.seekable.end(i);
       const start = _dvrVideo.seekable.start(i);
       if (isFinite(end) && end > start) return { start, end };
     }
@@ -463,7 +451,7 @@ function _scheduleExpiryRefresh(url) {
     return;
   }
   const msUntilRefresh = expMs - Date.now() - EXPIRY_LEAD_MS;
-  console.log('[KickTiny DVR] Token expires in', Math.round((expMs - Date.now()) / 1000), 's');
+  console.log('[KickTiny DVR] Token expires in', Math.round((expMs - Date.now()) / 1000), 's — refresh in', Math.round(Math.max(5000, msUntilRefresh) / 1000), 's');
   _expiryTimer = setTimeout(() => {
     if (state.engine === 'dvr' && !_refreshing) _fetchAndExtendManifest();
   }, Math.max(5000, msUntilRefresh));
@@ -559,7 +547,9 @@ export async function enterDvrAtBehindLive(behindSec) {
     setState({ buffering: false }); return;
   }
 
+  // Reset segment store for fresh DVR session
   _segments = [];
+  _lastSegUrl = '';
   const appended = await _fetchAndMergeSnapshot(url);
   if (appended === 0) {
     console.warn('[KickTiny DVR] No segments in snapshot');
@@ -597,13 +587,10 @@ export async function enterDvrAtBehindLive(behindSec) {
   _scheduleExpiryRefresh(url);
   _dvrVideo.play().catch(() => {});
 
-  // Match the live IVS quality to the DVR quality list
   if (state.quality !== null && state.dvrQualities?.length) {
     const match = state.dvrQualities.find(q => q.name === state.quality?.name)
       || state.dvrQualities.find(q => q.name.replace(/\d+$/, '') === state.quality?.name.replace(/\d+$/, ''));
-    if (match) {
-      setState({ dvrQuality: match });
-    }
+    if (match) setState({ dvrQuality: match });
   }
 
   console.log('[KickTiny DVR] DVR mode active');
@@ -634,9 +621,7 @@ export function exitDvrMode() {
     try {
       const pos     = p.getPosition?.() ?? 0;
       const latency = p.getLiveLatency?.() ?? 0;
-      if (isFinite(pos) && isFinite(latency) && latency > 0) {
-        p.seekTo(pos + latency + 0.25);
-      }
+      if (isFinite(pos) && isFinite(latency) && latency > 0) p.seekTo(pos + latency + 0.25);
     } catch (_) {}
     p.play();
   }
@@ -670,12 +655,13 @@ function _startPositionPoll() {
 
     setState({ dvrBehindLive: behindLive, dvrWindowSec: windowSec, atLiveEdge: behindLive <= 30 });
 
-    // Within 60s of end of loaded segments → catch-up mode (poll for new segments)
-    // Outside 60s (user seeked back) → stop catch-up mode
     if (win) {
-      if (win.end - _dvrVideo.currentTime < NEAR_END_THRESHOLD) {
+      const secsFromEnd = win.end - _dvrVideo.currentTime;
+      // Start catch-up when within 60s of end, stop only when > 120s away (hysteresis)
+      // This prevents rapid start/stop cycling when extrapolation pushes win.end forward
+      if (secsFromEnd < NEAR_END_THRESHOLD) {
         _startCatchUpTimer();
-      } else {
+      } else if (secsFromEnd > NEAR_END_THRESHOLD * 2 && _catchUpTimer) {
         _stopCatchUpTimer();
       }
     }
