@@ -248,6 +248,7 @@ async function _switchDvrVariant(q) {
   if (!vodUrl) return;
 
   const res  = await fetch(vodUrl);
+  if (!res.ok) { console.warn('[KickTiny DVR] variant manifest fetch failed:', res.status); return; }
   const text = await res.text();
   if (!text.includes('#EXT-X-STREAM-INF')) return;
 
@@ -273,6 +274,7 @@ async function _switchDvrVariant(q) {
   _segments = [];
   _lastSegUrl = '';
   const varRes  = await fetch(variantUrl);
+  if (!varRes.ok) { console.warn('[KickTiny DVR] variant fetch failed:', varRes.status); return; }
   const varText = await varRes.text();
   _mergeSegments(varText, variantUrl);
 
@@ -457,11 +459,13 @@ function _setDvrQualitiesFromMultivariant(text) {
 async function _fetchAndMergeSnapshot(snapshotUrl) {
   try {
     const res  = await fetch(snapshotUrl);
+    if (!res.ok) throw new Error(`snapshot ${res.status}`);
     const text = await res.text();
     if (text.includes('#EXT-X-STREAM-INF')) {
       _setDvrQualitiesFromMultivariant(text);
       const playlistUrl = _pickVariantUrl(text, snapshotUrl);
       const varRes  = await fetch(playlistUrl);
+      if (!varRes.ok) throw new Error(`variant playlist ${varRes.status}`);
       const varText = await varRes.text();
       return _mergeSegments(varText, playlistUrl);
     }
@@ -665,9 +669,10 @@ function _returnToLiveUi() {
   if (_nativeVideo) _nativeVideo.style.visibility = 'visible';
 }
 
-function _restoreIvs(player, shouldPlay, wasVolume) {
+function _restoreIvs(player, shouldPlay, wasVolume, wasMuted) {
   if (!player) return;
   player.setVolume(wasVolume / 100);
+  player.setMuted(!!wasMuted);
   if (shouldPlay) player.play();
 }
 
@@ -717,6 +722,7 @@ async function enterDvrAtBehindLive(behindSec) {
   const p          = getPlayer();
   const wasPlaying = state.playing;
   const wasVolume  = state.volume;
+  const wasMuted   = state.muted;
   setState({ buffering: true });
 
   if (!_Hls) {
@@ -740,7 +746,7 @@ async function enterDvrAtBehindLive(behindSec) {
   const url = await fetchVodPlaybackUrl(state.vodId);
   if (!url) {
     console.warn('[KickTiny DVR] Could not fetch VOD URL');
-    _returnToLiveUi(); _restoreIvs(p, wasPlaying, wasVolume);
+    _returnToLiveUi(); _restoreIvs(p, wasPlaying, wasVolume, wasMuted);
     setState({ buffering: false }); return;
   }
 
@@ -750,7 +756,7 @@ async function enterDvrAtBehindLive(behindSec) {
   const appended = await _fetchAndMergeSnapshot(url);
   if (appended === 0) {
     console.warn('[KickTiny DVR] No segments in snapshot');
-    _returnToLiveUi(); _restoreIvs(p, wasPlaying, wasVolume);
+    _returnToLiveUi(); _restoreIvs(p, wasPlaying, wasVolume, wasMuted);
     setState({ buffering: false }); return;
   }
 
@@ -760,7 +766,7 @@ async function enterDvrAtBehindLive(behindSec) {
   const win = await _waitForSeekable();
   if (!win) {
     console.warn('[KickTiny DVR] Seekable window never available');
-    _returnToLiveUi(); _destroyHls(); _restoreIvs(p, wasPlaying, wasVolume);
+    _returnToLiveUi(); _destroyHls(); _restoreIvs(p, wasPlaying, wasVolume, wasMuted);
     setState({ buffering: false }); return;
   }
 
@@ -810,6 +816,8 @@ function exitDvrMode() {
   const p = getPlayer();
   if (p) {
     p.setVolume(state.volume / 100);
+    p.setMuted(state.muted);
+    p.setMuted(state.muted);
     if (state.dvrQuality !== null && state.qualities?.length) {
       const match = state.qualities.find(q => q.name === state.dvrQuality.name)
         || state.qualities.find(q => q.name.replace(/\d+$/, '') === state.dvrQuality.name.replace(/\d+$/, ''));
@@ -1402,48 +1410,60 @@ function svgSpin() {
 
 // ── ui\volume.js ──
 
-
-
 function createVolumeCtrl() {
   const wrap = document.createElement('div');
   wrap.className = 'kt-vol-wrap';
 
   const btn = document.createElement('button');
   btn.className = 'kt-btn kt-mute';
-  btn.title = 'Mute (m)';
-  btn.addEventListener('click', toggleMute);
+  btn.addEventListener('click', e => { e.stopPropagation(); toggleMute(); });
+
+  const sliderWrap = document.createElement('div');
+  sliderWrap.className = 'kt-vol-slider-wrap';
 
   const slider = document.createElement('input');
-  slider.type = 'range';
+  slider.type      = 'range';
   slider.className = 'kt-vol-slider';
-  slider.min = 0;
-  slider.max = 100;
-  slider.step = 1;
+  slider.min  = '0';
+  slider.max  = '100';
+  slider.step = '1';
 
-  const clip = document.createElement('div');
-  clip.className = 'kt-vol-clip';
-  clip.appendChild(slider);
+  sliderWrap.appendChild(slider);
+  wrap.append(btn, sliderWrap);
 
+  // ── slider drag ─────────────────────────────────────────────────────────────
   let _dragging = false;
+
   slider.addEventListener('mousedown', () => {
     _dragging = true;
     const up = () => { _dragging = false; document.removeEventListener('mouseup', up); };
     document.addEventListener('mouseup', up);
   });
-  slider.addEventListener('touchstart', () => { _dragging = true; }, { passive: true });
-  slider.addEventListener('touchend',   () => { _dragging = false; }, { passive: true });
-  slider.addEventListener('input', () => setVolume(Number(slider.value)));
 
-  wrap.append(btn, clip);
-
-  subscribe(({ volume, muted }) => {
-    btn.innerHTML = svgVol(muted || volume === 0);
-    if (!_dragging) slider.value = muted ? 0 : volume;
-    btn.title = muted ? 'Unmute (m)' : 'Mute (m)';
+  slider.addEventListener('input', () => {
+    setVolume(Number(slider.value));
+    _updateFill(Number(slider.value));
   });
 
-  btn.innerHTML = svgVol(state.muted || state.volume === 0);
-  slider.value = state.muted ? 0 : state.volume;
+  // ── sync UI from state ───────────────────────────────────────────────────────
+
+  function syncUi(volume, muted) {
+    const isMuted = muted || volume === 0;
+    btn.innerHTML = svgVol(isMuted);
+    btn.title     = isMuted ? 'Unmute (m)' : 'Mute (m)';
+    if (!_dragging) {
+      const displayVal = isMuted ? 0 : volume;
+      slider.value = displayVal;
+      _updateFill(displayVal);
+    }
+  }
+
+  function _updateFill(pct) {
+    slider.style.setProperty('--kt-vol-pct', pct + '%');
+  }
+
+  subscribe(({ volume, muted }) => syncUi(volume, muted));
+  syncUi(state.volume, state.muted);
 
   return wrap;
 }
@@ -2251,7 +2271,7 @@ function createTopBar() {
 
 
 
-const CSS = `:root{--kt-black:#0d0d0d;--kt-white:#f0f0f0;--kt-green:#4fc724;--kt-dim:rgba(255,255,255,0.55);--kt-bar-h:48px;--kt-radius:5px;--kt-font:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;--kt-size:13px;--kt-trans:0.2s ease}#kt-root{position:absolute;inset:0;z-index:9999;pointer-events:none;font-family:var(--kt-font);font-size:var(--kt-size);color:var(--kt-white);user-select:none;-webkit-user-select:none}#kt-root.kt-idle{cursor:none}.kt-idle,.kt-idle *{cursor:none !important}.kt-top-bar{position:absolute;top:0;left:0;right:0;padding:10px 14px;display:flex;flex-direction:column;gap:2px;background:linear-gradient(to bottom,rgba(0,0,0,0.85) 0%,rgba(0,0,0,0.5) 60%,transparent 100%);pointer-events:all;opacity:0;transition:opacity var(--kt-trans)}.kt-top-bar-visible{opacity:1}.kt-channel-wrap{display:flex;align-items:center;gap:8px}.kt-avatar{width:28px;height:28px;border-radius:50%;object-fit:cover;flex-shrink:0;border:1.5px solid rgba(255,255,255,0.2)}.kt-channel-link{font-size:15px;font-weight:700;color:var(--kt-white);text-decoration:none;line-height:1.2;pointer-events:auto}.kt-channel-link:hover{color:var(--kt-green)}.kt-stream-title{font-size:13px;color:var(--kt-white);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.4;padding-bottom:2px}.kt-bar{position:absolute;bottom:0;left:0;right:0;display:flex;flex-direction:column;padding:0;gap:0;background:linear-gradient(to top,rgba(0,0,0,0.75) 0%,transparent 100%);pointer-events:all;opacity:0;transition:opacity var(--kt-trans);overflow:visible}.kt-bar-visible{opacity:1}.kt-controls{height:var(--kt-bar-h);display:flex;align-items:stretch;justify-content:space-between;padding:0 10px;gap:6px;overflow:visible}.kt-bar-left,.kt-bar-right{display:flex;align-items:center;gap:4px;overflow:visible}.kt-seekbar{width:100%;padding:10px 10px 4px;box-sizing:border-box;cursor:pointer;position:relative}.kt-seekbar-track{position:relative;height:3px;border-radius:2px;background:rgba(255,255,255,0.25);transition:height var(--kt-trans)}.kt-seekbar:hover .kt-seekbar-track{height:5px}.kt-seekbar-unavail{position:absolute;right:0;left:auto;top:0;height:100%;width:0%;border-radius:0 2px 2px 0;pointer-events:none;z-index:0;background:repeating-linear-gradient( -45deg,rgba(255,255,255,0.08) 0px,rgba(255,255,255,0.08) 3px,rgba(255,255,255,0.03) 3px,rgba(255,255,255,0.03) 6px )}.kt-seekbar-prog{position:absolute;left:0;top:0;height:100%;width:0%;background:var(--kt-green);border-radius:2px;pointer-events:none;z-index:1}.kt-seekbar-thumb{position:absolute;top:50%;left:0%;width:13px;height:13px;border-radius:50%;background:#fff;transform:translate(-50%,-50%) scale(0);transition:transform 0.15s ease;pointer-events:none;z-index:2}.kt-seekbar:hover .kt-seekbar-thumb{transform:translate(-50%,-50%) scale(1)}.kt-seekbar-tip{position:absolute;display:none;background:rgba(18,18,18,0.9);color:var(--kt-white);font-size:11px;font-weight:600;padding:3px 7px;border-radius:4px;white-space:nowrap;pointer-events:none;user-select:none}.kt-seekbar-tip.kt-tip-unavail{opacity:0.6;background:rgba(18,18,18,0.7)}.kt-btn:focus-visible,.kt-popup-item:focus-visible,.kt-channel-link:focus-visible,.kt-overlay-btn:focus-visible{outline:2px solid var(--kt-green);outline-offset:2px}.kt-btn{background:none;border:none;padding:0 8px;height:32px;min-width:32px;align-self:center;cursor:pointer;color:var(--kt-white);display:flex;align-items:center;justify-content:center;border-radius:var(--kt-radius);transition:color var(--kt-trans),background var(--kt-trans);line-height:0}.kt-btn:hover{color:var(--kt-green);background:rgba(255,255,255,0.08)}.kt-btn svg{width:20px;height:20px}@keyframes kt-spin{to{transform:rotate(360deg)}}.kt-spin{animation:kt-spin 0.8s linear infinite}.kt-vol-wrap{display:flex;align-items:center;align-self:center;height:32px;gap:4px}.kt-vol-clip{display:flex;align-items:center;align-self:stretch;overflow:hidden;max-width:0;transition:max-width var(--kt-trans)}.kt-vol-wrap:hover .kt-vol-clip,.kt-vol-clip:focus-within{max-width:74px}.kt-vol-slider{-webkit-appearance:none;appearance:none;width:70px;flex-shrink:0;margin-left:4px;height:20px;padding:0;border-radius:2px;background:transparent;outline:none;cursor:pointer;display:block}.kt-vol-slider::-webkit-slider-runnable-track{height:3px;border-radius:2px;background:rgba(255,255,255,0.3)}.kt-vol-slider::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;margin-top:-4.5px;border-radius:50%;background:var(--kt-green);cursor:pointer}.kt-vol-slider::-moz-range-thumb{width:12px;height:12px;border-radius:50%;background:var(--kt-green);cursor:pointer;border:none}.kt-vol-slider::-moz-range-track{height:3px;border-radius:2px;background:rgba(255,255,255,0.3)}.kt-vol-slider::-moz-range-progress{height:3px;border-radius:2px;background:var(--kt-green)}.kt-info{display:flex;align-items:center;align-self:center;gap:8px;padding:0 6px;height:32px}.kt-live-badge{background:#b30906;color:#fff;font-size:10px;font-weight:600;letter-spacing:0.05em;padding:0 10px;height:22px;display:inline-flex;align-items:center;justify-content:center;border-radius:var(--kt-radius);line-height:1;transition:background var(--kt-trans)}.kt-live-badge.kt-offline{background:#555}.kt-live-badge.kt-behind{background:#555;cursor:pointer}.kt-live-badge.kt-behind:hover{background:#eb0400}.kt-viewers,.kt-uptime{color:var(--kt-dim);font-size:12px;white-space:nowrap;line-height:1}.kt-popup-wrap{position:relative;align-self:stretch;display:flex;align-items:center}.kt-popup{position:fixed;min-width:120px;overflow-y:auto;background:rgba(18,18,18,0.97);border:1px solid rgba(255,255,255,0.12);border-radius:10px;padding:6px;z-index:99999;box-shadow:0 8px 24px rgba(0,0,0,0.6);font-family:var(--kt-font);pointer-events:all;cursor:default}.kt-popup[hidden]{display:none}.kt-popup-item{display:block;width:100%;padding:7px 12px;text-align:left;background:none;border:none;color:var(--kt-white);font-size:var(--kt-size);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;cursor:pointer;white-space:nowrap;border-radius:6px;transition:color 0.2s ease,background 0.2s ease}.kt-popup-item:hover{color:var(--kt-white);background:rgba(255,255,255,0.1)}.kt-popup-item.kt-active{color:var(--kt-green)}.kt-qual-btn,.kt-speed-btn{font-size:12px;font-weight:600;padding:0 10px;height:28px;min-width:unset;letter-spacing:0.02em}.kt-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;transition:opacity var(--kt-trans)}.kt-overlay-hidden{opacity:0}.kt-overlay-btn{pointer-events:auto;background:rgba(0,0,0,0.5);border:none;border-radius:50%;width:60px;height:60px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--kt-white);transition:transform var(--kt-trans),background var(--kt-trans)}.kt-overlay-hidden .kt-overlay-btn{pointer-events:none}.kt-overlay-btn:hover{transform:scale(1.1);background:rgba(83,252,24,0.25);color:var(--kt-green)}.kt-overlay-btn svg{width:32px;height:32px}`;
+const CSS = `:root{--kt-black:#0d0d0d;--kt-white:#f0f0f0;--kt-green:#53fc18;--kt-dim:rgba(255,255,255,0.55);--kt-bar-h:42px;--kt-radius:5px;--kt-font:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;--kt-size:13px;--kt-trans:0.2s ease}#kt-root{position:absolute;inset:0;z-index:9999;pointer-events:none;font-family:var(--kt-font);font-size:var(--kt-size);color:var(--kt-white);user-select:none;-webkit-user-select:none}#kt-root.kt-idle{cursor:none}.kt-idle,.kt-idle *{cursor:none !important}.kt-top-bar{position:absolute;top:0;left:0;right:0;padding:10px 14px;display:flex;flex-direction:column;gap:2px;background:linear-gradient(to bottom,rgba(0,0,0,0.85) 0%,rgba(0,0,0,0.5) 60%,transparent 100%);pointer-events:all;opacity:0;transition:opacity var(--kt-trans)}.kt-top-bar-visible{opacity:1}.kt-channel-wrap{display:flex;align-items:center;gap:8px}.kt-avatar{width:28px;height:28px;border-radius:50%;object-fit:cover;flex-shrink:0;border:1.5px solid rgba(255,255,255,0.2)}.kt-channel-link{font-size:15px;font-weight:700;color:var(--kt-white);text-decoration:none;line-height:1.2;pointer-events:auto}.kt-channel-link:hover{color:var(--kt-green)}.kt-stream-title{font-size:13px;color:var(--kt-white);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.4;padding-bottom:2px}.kt-bar{position:absolute;bottom:0;left:0;right:0;display:flex;flex-direction:column;padding:0;gap:0;background:linear-gradient(to top,rgba(0,0,0,0.75) 0%,transparent 100%);pointer-events:all;opacity:0;transition:opacity var(--kt-trans);overflow:visible}.kt-bar-visible{opacity:1}.kt-controls{height:var(--kt-bar-h);display:flex;align-items:stretch;justify-content:space-between;padding:0 10px;gap:6px;overflow:visible;min-width:0}.kt-bar-left,.kt-bar-right{display:flex;align-items:center;gap:4px;overflow:visible;flex-shrink:0;min-width:0}.kt-info{display:flex;align-items:center;align-self:stretch;gap:6px;padding:0 4px;flex-shrink:1;overflow:hidden}.kt-bar-left,.kt-bar-right{display:flex;align-items:center;gap:4px;overflow:visible;flex-shrink:0}.kt-seekbar{width:100%;padding:10px 10px 4px;box-sizing:border-box;cursor:pointer;position:relative}.kt-seekbar-track{position:relative;height:3px;border-radius:2px;background:rgba(255,255,255,0.25);transition:height var(--kt-trans)}.kt-seekbar:hover .kt-seekbar-track{height:5px}.kt-seekbar-prog{position:absolute;left:0;top:0;height:100%;width:0%;background:var(--kt-green);border-radius:2px;pointer-events:none;z-index:1}.kt-seekbar-thumb{position:absolute;top:50%;left:0%;width:13px;height:13px;border-radius:50%;background:#fff;transform:translate(-50%,-50%) scale(0);transition:transform 0.15s ease;pointer-events:none;z-index:2}.kt-seekbar:hover .kt-seekbar-thumb{transform:translate(-50%,-50%) scale(1)}.kt-seekbar-tip{position:absolute;display:none;background:rgba(18,18,18,0.9);color:var(--kt-white);font-size:11px;font-weight:600;padding:3px 7px;border-radius:4px;white-space:nowrap;pointer-events:none;user-select:none}.kt-btn:focus-visible,.kt-popup-item:focus-visible,.kt-channel-link:focus-visible,.kt-overlay-btn:focus-visible{outline:2px solid var(--kt-green);outline-offset:2px}.kt-btn{background:none;border:none;padding:0 6px;align-self:center;height:80%;cursor:pointer;color:var(--kt-white);display:flex;align-items:center;justify-content:center;border-radius:var(--kt-radius);transition:color var(--kt-trans),background var(--kt-trans);line-height:0}.kt-btn:hover{color:var(--kt-green);background:rgba(255,255,255,0.08)}.kt-btn svg{width:20px;height:20px}@keyframes kt-spin{to{transform:rotate(360deg)}}.kt-spin{animation:kt-spin 0.8s linear infinite}.kt-vol-wrap{display:flex;align-items:center;align-self:stretch;flex-shrink:0;gap:4px}.kt-vol-slider-wrap{display:none;align-items:center}.kt-vol-wrap:hover .kt-vol-slider-wrap{display:flex}.kt-vol-slider{-webkit-appearance:none;appearance:none;width:70px;height:16px;border-radius:2px;outline:none;cursor:pointer;background:transparent}.kt-vol-slider::-webkit-slider-runnable-track{height:3px;border-radius:2px;background:linear-gradient(to right,var(--kt-green) 0%,var(--kt-green) var(--kt-vol-pct,100%),rgba(255,255,255,0.3) var(--kt-vol-pct,100%),rgba(255,255,255,0.3) 100% )}.kt-vol-slider::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;margin-top:-4.5px;border-radius:50%;background:#fff;cursor:pointer}.kt-vol-slider::-moz-range-thumb{width:12px;height:12px;border-radius:50%;background:#fff;cursor:pointer;border:none}.kt-vol-slider::-moz-range-track{height:3px;border-radius:2px;background:rgba(255,255,255,0.3)}.kt-vol-slider::-moz-range-progress{height:3px;border-radius:2px;background:var(--kt-green)}.kt-live-badge{background:#b30906;color:#fff;font-size:10px;font-weight:700;letter-spacing:0.05em;padding:0 8px;height:22px;align-self:center;display:flex;align-items:center;border-radius:var(--kt-radius);line-height:1;transition:background var(--kt-trans)}.kt-live-badge.kt-offline{background:#555}.kt-live-badge.kt-behind{background:#555;cursor:pointer}.kt-live-badge.kt-behind:hover{background:#b30906}.kt-viewers,.kt-uptime{color:var(--kt-dim);font-size:12px;white-space:nowrap}.kt-popup-wrap{position:relative;align-self:stretch;display:flex;align-items:center}.kt-popup{position:fixed;min-width:120px;overflow-y:auto;background:rgba(18,18,18,0.97);border:1px solid rgba(255,255,255,0.12);border-radius:10px;padding:6px;z-index:99999;box-shadow:0 8px 24px rgba(0,0,0,0.6);font-family:var(--kt-font);pointer-events:all;cursor:default}.kt-popup[hidden]{display:none}.kt-popup-item{display:block;width:100%;padding:7px 12px;text-align:left;background:none;border:none;color:var(--kt-white);font-size:var(--kt-size);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;cursor:pointer;white-space:nowrap;border-radius:6px;transition:color 0.2s ease,background 0.2s ease}.kt-popup-item:hover{color:var(--kt-white);background:rgba(255,255,255,0.1)}.kt-popup-item.kt-active{color:var(--kt-green)}.kt-qual-btn,.kt-speed-btn{font-size:12px;font-weight:600;padding:6px 8px;letter-spacing:0.02em}.kt-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;transition:opacity var(--kt-trans)}.kt-overlay-hidden{opacity:0}.kt-overlay-btn{pointer-events:auto;background:rgba(0,0,0,0.5);border:none;border-radius:50%;width:60px;height:60px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--kt-white);transition:transform var(--kt-trans),background var(--kt-trans)}.kt-overlay-hidden .kt-overlay-btn{pointer-events:none}.kt-overlay-btn:hover{transform:scale(1.1);background:rgba(83,252,24,0.25);color:var(--kt-green)}.kt-overlay-btn svg{width:32px;height:32px}`;
 
 function injectStyles(css) {
   const style = document.createElement('style');

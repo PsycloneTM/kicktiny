@@ -51,6 +51,7 @@ async function _switchDvrVariant(q) {
   if (!vodUrl) return;
 
   const res  = await fetch(vodUrl);
+  if (!res.ok) { console.warn('[KickTiny DVR] variant manifest fetch failed:', res.status); return; }
   const text = await res.text();
   if (!text.includes('#EXT-X-STREAM-INF')) return;
 
@@ -76,6 +77,7 @@ async function _switchDvrVariant(q) {
   _segments = [];
   _lastSegUrl = '';
   const varRes  = await fetch(variantUrl);
+  if (!varRes.ok) { console.warn('[KickTiny DVR] variant fetch failed:', varRes.status); return; }
   const varText = await varRes.text();
   _mergeSegments(varText, variantUrl);
 
@@ -260,11 +262,13 @@ function _setDvrQualitiesFromMultivariant(text) {
 async function _fetchAndMergeSnapshot(snapshotUrl) {
   try {
     const res  = await fetch(snapshotUrl);
+    if (!res.ok) throw new Error(`snapshot ${res.status}`);
     const text = await res.text();
     if (text.includes('#EXT-X-STREAM-INF')) {
       _setDvrQualitiesFromMultivariant(text);
       const playlistUrl = _pickVariantUrl(text, snapshotUrl);
       const varRes  = await fetch(playlistUrl);
+      if (!varRes.ok) throw new Error(`variant playlist ${varRes.status}`);
       const varText = await varRes.text();
       return _mergeSegments(varText, playlistUrl);
     }
@@ -468,9 +472,10 @@ function _returnToLiveUi() {
   if (_nativeVideo) _nativeVideo.style.visibility = 'visible';
 }
 
-function _restoreIvs(player, shouldPlay, wasVolume) {
+function _restoreIvs(player, shouldPlay, wasVolume, wasMuted) {
   if (!player) return;
   player.setVolume(wasVolume / 100);
+  player.setMuted(!!wasMuted);
   if (shouldPlay) player.play();
 }
 
@@ -520,6 +525,7 @@ export async function enterDvrAtBehindLive(behindSec) {
   const p          = getPlayer();
   const wasPlaying = state.playing;
   const wasVolume  = state.volume;
+  const wasMuted   = state.muted;
   setState({ buffering: true });
 
   if (!_Hls) {
@@ -543,7 +549,7 @@ export async function enterDvrAtBehindLive(behindSec) {
   const url = await fetchVodPlaybackUrl(state.vodId);
   if (!url) {
     console.warn('[KickTiny DVR] Could not fetch VOD URL');
-    _returnToLiveUi(); _restoreIvs(p, wasPlaying, wasVolume);
+    _returnToLiveUi(); _restoreIvs(p, wasPlaying, wasVolume, wasMuted);
     setState({ buffering: false }); return;
   }
 
@@ -553,7 +559,7 @@ export async function enterDvrAtBehindLive(behindSec) {
   const appended = await _fetchAndMergeSnapshot(url);
   if (appended === 0) {
     console.warn('[KickTiny DVR] No segments in snapshot');
-    _returnToLiveUi(); _restoreIvs(p, wasPlaying, wasVolume);
+    _returnToLiveUi(); _restoreIvs(p, wasPlaying, wasVolume, wasMuted);
     setState({ buffering: false }); return;
   }
 
@@ -563,7 +569,7 @@ export async function enterDvrAtBehindLive(behindSec) {
   const win = await _waitForSeekable();
   if (!win) {
     console.warn('[KickTiny DVR] Seekable window never available');
-    _returnToLiveUi(); _destroyHls(); _restoreIvs(p, wasPlaying, wasVolume);
+    _returnToLiveUi(); _destroyHls(); _restoreIvs(p, wasPlaying, wasVolume, wasMuted);
     setState({ buffering: false }); return;
   }
 
@@ -613,6 +619,8 @@ export function exitDvrMode() {
   const p = getPlayer();
   if (p) {
     p.setVolume(state.volume / 100);
+    p.setMuted(state.muted);
+    p.setMuted(state.muted);
     if (state.dvrQuality !== null && state.qualities?.length) {
       const match = state.qualities.find(q => q.name === state.dvrQuality.name)
         || state.qualities.find(q => q.name.replace(/\d+$/, '') === state.dvrQuality.name.replace(/\d+$/, ''));

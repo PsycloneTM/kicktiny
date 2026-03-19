@@ -7,40 +7,54 @@ export function createVolumeCtrl() {
 
   const btn = document.createElement('button');
   btn.className = 'kt-btn kt-mute';
-  btn.title = 'Mute (m)';
-  btn.addEventListener('click', toggleMute);
+  btn.addEventListener('click', e => { e.stopPropagation(); toggleMute(); });
+
+  const sliderWrap = document.createElement('div');
+  sliderWrap.className = 'kt-vol-slider-wrap';
 
   const slider = document.createElement('input');
-  slider.type = 'range';
+  slider.type      = 'range';
   slider.className = 'kt-vol-slider';
-  slider.min = 0;
-  slider.max = 100;
-  slider.step = 1;
+  slider.min  = '0';
+  slider.max  = '100';
+  slider.step = '1';
 
-  const clip = document.createElement('div');
-  clip.className = 'kt-vol-clip';
-  clip.appendChild(slider);
+  sliderWrap.appendChild(slider);
+  wrap.append(btn, sliderWrap);
 
+  // ── slider drag ─────────────────────────────────────────────────────────────
   let _dragging = false;
+
   slider.addEventListener('mousedown', () => {
     _dragging = true;
     const up = () => { _dragging = false; document.removeEventListener('mouseup', up); };
     document.addEventListener('mouseup', up);
   });
-  slider.addEventListener('touchstart', () => { _dragging = true; }, { passive: true });
-  slider.addEventListener('touchend',   () => { _dragging = false; }, { passive: true });
-  slider.addEventListener('input', () => setVolume(Number(slider.value)));
 
-  wrap.append(btn, clip);
-
-  subscribe(({ volume, muted }) => {
-    btn.innerHTML = svgVol(muted || volume === 0);
-    if (!_dragging) slider.value = muted ? 0 : volume;
-    btn.title = muted ? 'Unmute (m)' : 'Mute (m)';
+  slider.addEventListener('input', () => {
+    setVolume(Number(slider.value));
+    _updateFill(Number(slider.value));
   });
 
-  btn.innerHTML = svgVol(state.muted || state.volume === 0);
-  slider.value = state.muted ? 0 : state.volume;
+  // ── sync UI from state ───────────────────────────────────────────────────────
+
+  function syncUi(volume, muted) {
+    const isMuted = muted || volume === 0;
+    btn.innerHTML = svgVol(isMuted);
+    btn.title     = isMuted ? 'Unmute (m)' : 'Mute (m)';
+    if (!_dragging) {
+      const displayVal = isMuted ? 0 : volume;
+      slider.value = displayVal;
+      _updateFill(displayVal);
+    }
+  }
+
+  function _updateFill(pct) {
+    slider.style.setProperty('--kt-vol-pct', pct + '%');
+  }
+
+  subscribe(({ volume, muted }) => syncUi(volume, muted));
+  syncUi(state.volume, state.muted);
 
   return wrap;
 }
