@@ -131,9 +131,15 @@ export function seekToLive() {
   }
   const p = getPlayer();
   if (!p) return;
-  const latency = p.getLiveLatency?.();
-  if (latency == null || !isFinite(latency)) return;
-  p.seekTo(p.getPosition() + latency + 0.25);
+  // Speed up to 2x until we reach the live edge, then snap back to 1x
+  p.setPlaybackRate(2);
+  const check = setInterval(() => {
+    const latency = p.getLiveLatency?.();
+    if (latency == null || !isFinite(latency) || latency <= 3.5) {
+      p.setPlaybackRate(1);
+      clearInterval(check);
+    }
+  }, 250);
 }
 
 // ── fullscreen ────────────────────────────────────────────────────────────────

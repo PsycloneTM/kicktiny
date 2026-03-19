@@ -1,5 +1,6 @@
 import { setState, state } from './state.js';
 import { loadPrefs, KEYS } from './prefs.js';
+import { enterDvrAtBehindLive } from './dvr/controller.js';
 
 const EV = {
   STATE_CHANGED:         'PlayerStateChanged',
@@ -130,13 +131,35 @@ function onPlayerReady() {
     qualityApplied = applyQualityPref(p, prefs.quality);
   }
 
+  let _pausedAt = null;
+
   p.addEventListener(EV.STATE_CHANGED, e => {
     if (state.engine !== 'ivs') return;
     const ps = e?.state ?? e;
     const buffering = ps === PS.BUFFERING;
-    const playing = ps === PS.PLAYING;
+    const playing   = ps === PS.PLAYING;
 
-    if (playing) sessionStorage.removeItem('kt.reloads');
+    if (playing) {
+      sessionStorage.removeItem('kt.reloads');
+      // Resuming — check if paused long enough to enter DVR instead of live edge
+      if (_pausedAt !== null) {
+        const pausedMs = Date.now() - _pausedAt;
+        _pausedAt = null;
+        if (pausedMs > 30_000 && state.vodId) {
+          // Use actual live latency as behindSec — IVS keeps buffering while paused
+          // so latency reflects real distance behind live, not the pause duration
+          const latency = p.getLiveLatency?.() ?? (pausedMs / 1000);
+          const behindSec = isFinite(latency) && latency > 0 ? latency : pausedMs / 1000;
+          console.log('[KickTiny] Long pause (' + Math.round(pausedMs / 1000) + 's) — entering DVR', behindSec.toFixed(1), 's behind live');
+          p.pause();
+          enterDvrAtBehindLive(behindSec);
+          return;
+        }
+      }
+    } else if (!playing && !buffering) {
+      // Paused — record timestamp (only if not already set, i.e. not our own p.pause() call)
+      if (_pausedAt === null) _pausedAt = Date.now();
+    }
 
     setState({ playing, buffering });
   });
