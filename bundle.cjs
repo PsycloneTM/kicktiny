@@ -57,7 +57,7 @@ function build() {
 // @name         KickTiny
 // @namespace    https://github.com/reda777/kicktiny
 // @version      ${version}
-// @description  Custom player overlay for Kick.com embeds
+// @description  Custom player overlay for Kick.com embeds with DVR
 // @author       Reda777
 // @match        https://player.kick.com/*
 // @updateURL    https://raw.githubusercontent.com/reda777/kicktiny/main/dist/kicktiny.user.js
