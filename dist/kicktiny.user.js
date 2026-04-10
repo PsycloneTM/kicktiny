@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KickTiny
 // @namespace    https://github.com/reda777/kicktiny
-// @version      0.3.6
+// @version      0.3.7
 // @description  Custom player overlay for Kick.com embeds with DVR
 // @author       Reda777
 // @match        https://player.kick.com/*
@@ -294,7 +294,7 @@ const MAX_REAPPLY_ATTEMPTS      = 3;
 const MAX_RELOAD_ATTEMPTS       = 3;
 
 
-// ── engines\ivs-engine.js ──
+// ── engines/ivs-engine.js ──
 // ── engines/ivs-engine.js ────────────────────────────────────────────────────
 // IVS player adapter. Extracted from adapter.js.
 // Receives the store and prefs as constructor parameters — no global imports.
@@ -622,7 +622,7 @@ function createIvsEngine(store, prefs) {
 }
 
 
-// ── engines\manifest-builder.js ──
+// ── engines/manifest-builder.js ──
 // ── engines/manifest-builder.js ──────────────────────────────────────────────
 // Owns the segment array and all synthetic HLS manifest logic.
 // Pure module — no store dependency, no side-effects.
@@ -813,7 +813,7 @@ function createManifestBuilder() {
 }
 
 
-// ── engines\dvr-engine.js ──
+// ── engines/dvr-engine.js ──
 // ── engines/dvr-engine.js ────────────────────────────────────────────────────
 // HLS.js DVR controller. Extracted from dvr/controller.js.
 // Receives store and api as constructor parameters — no global imports.
@@ -1527,7 +1527,7 @@ function createActions(store, engineManager, prefs) {
 }
 
 
-// ── services\viewer-interceptor.js ──
+// ── services/viewer-interceptor.js ──
 // ── services/viewer-interceptor.js ───────────────────────────────────────────
 // Intercepts Kick's own current-viewers fetches so we can read viewer counts
 // with zero extra network requests. Isolated here so the side-effect of
@@ -1567,7 +1567,7 @@ function createViewerInterceptor() {
 }
 
 
-// ── ui\icons.js ──
+// ── ui/icons.js ──
 // ── ui/icons.js ───────────────────────────────────────────────────────────────
 // All SVG icon functions in one place. Importing from here keeps individual
 // component files free of inline SVG strings.
@@ -1594,7 +1594,7 @@ function svgVolume(muted) {
 }
 
 
-// ── ui\play-button.js ──
+// ── ui/play-button.js ──
 
 function createPlayBtn(store, actions) {
   const btn = document.createElement('button');
@@ -1617,7 +1617,7 @@ function createPlayBtn(store, actions) {
 }
 
 
-// ── ui\volume-control.js ──
+// ── ui/volume-control.js ──
 
 function createVolumeCtrl(store, actions) {
   const wrap = document.createElement('div');
@@ -1668,7 +1668,7 @@ function createVolumeCtrl(store, actions) {
 }
 
 
-// ── ui\popup.js ──
+// ── ui/popup.js ──
 let _popupGlobalsBound = false;
 function bindPopupGlobals() {
   if (_popupGlobalsBound) return;
@@ -1721,7 +1721,7 @@ function setupPopupToggle(btn, popup, onOpen) {
 }
 
 
-// ── utils\format.js ──
+// ── utils/format.js ──
 function fmtViewers(n) {
   if (n === null || n === undefined) return '';
   if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
@@ -1753,7 +1753,7 @@ function fmtDuration(totalSec) {
   return `${m}:${String(s).padStart(2,'0')}`;
 }
 
-// ── ui\quality-menu.js ──
+// ── ui/quality-menu.js ──
 
 function createQualityBtn(store, actions) {
   const wrap = document.createElement('div');
@@ -1828,7 +1828,7 @@ function createQualityBtn(store, actions) {
 }
 
 
-// ── ui\speed-menu.js ──
+// ── ui/speed-menu.js ──
 
 const RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
 
@@ -1871,7 +1871,7 @@ function createSpeedBtn(store, actions) {
 }
 
 
-// ── ui\fullscreen-button.js ──
+// ── ui/fullscreen-button.js ──
 
 function createFullscreenBtn(store, actions) {
   const btn = document.createElement('button');
@@ -1892,7 +1892,7 @@ function createFullscreenBtn(store, actions) {
 }
 
 
-// ── ui\info.js ──
+// ── ui/info.js ──
 
 function createInfo(store, actions, viewerInterceptor, api) {
   const wrap    = document.createElement('div');  wrap.className    = 'kt-info';
@@ -2019,7 +2019,7 @@ function createInfo(store, actions, viewerInterceptor, api) {
 }
 
 
-// ── ui\seekbar.js ──
+// ── ui/seekbar.js ──
 
 function createSeekbar(store, actions) {
   const wrap  = document.createElement('div');  wrap.className  = 'kt-seekbar';
@@ -2116,7 +2116,7 @@ function createSeekbar(store, actions) {
 }
 
 
-// ── ui\bar.js ──
+// ── ui/bar.js ──
 
 function createBar(store, actions, viewerInterceptor, api) {
   const bar = document.createElement('div');
@@ -2206,7 +2206,7 @@ function initBarHover(root, bar, container, topBar, store) {
 }
 
 
-// ── ui\overlay.js ──
+// ── ui/overlay.js ──
 function createOverlay(store, actions) {
   const overlay = document.createElement('div');
   overlay.className = 'kt-overlay';
@@ -2229,7 +2229,7 @@ function createOverlay(store, actions) {
 }
 
 
-// ── ui\topbar.js ──
+// ── ui/topbar.js ──
 function createTopBar(store) {
   const bar = document.createElement('div');
   bar.className = 'kt-top-bar';
