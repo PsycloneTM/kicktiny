@@ -22,7 +22,7 @@ function build() {
 
     let code = fs.readFileSync(filePath, 'utf8');
 
-    const importRe = /^import\s+.*?\s+from\s+['"]([^'"]+)['"]\s*;?\n?/gm;
+    const importRe = /^import\b[\s\S]*?from\s+['"]([^'"]+)['"]\s*;[ \t]*\n?/gm;
     let m;
     while ((m = importRe.exec(code)) !== null) {
       const dep = m[1];
@@ -33,7 +33,7 @@ function build() {
       }
     }
 
-    code = code.replace(/^import\s+.*?\s+from\s+['"][^'"]+['"]\s*;?\n?/gm, '');
+    code = code.replace(importRe, '');
     code = code.replace(/^export\s+default\s+/gm, 'var _default = ');
     code = code.replace(/^export\s+(async\s+function|function|class|const|let|var)\s+/gm, '$1 ');
     code = code.replace(/^export\s*\{[^}]*\}\s*;?\n?/gm, '');

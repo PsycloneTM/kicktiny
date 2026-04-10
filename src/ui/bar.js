@@ -1,39 +1,33 @@
-import { createPlayBtn } from './play.js';
-import { createVolumeCtrl } from './volume.js';
-import { createQualityBtn } from './quality.js';
-import { createSpeedBtn } from './speed.js';
-import { createFullscreenBtn } from './fullscreen.js';
-import { createInfo } from './info.js';
-import { createSeekbar } from './seekbar.js';
-import { subscribe, state } from '../state.js';
+import { createPlayBtn }       from './play-button.js';
+import { createVolumeCtrl }    from './volume-control.js';
+import { createQualityBtn }    from './quality-menu.js';
+import { createSpeedBtn }      from './speed-menu.js';
+import { createFullscreenBtn } from './fullscreen-button.js';
+import { createInfo }          from './info.js';
+import { createSeekbar }       from './seekbar.js';
+import { CONTROLS_HIDE_DELAY_MS, CONTROLS_LEAVE_DELAY_MS } from '../constants.js';
 
-export function createBar() {
+export function createBar(store, actions, viewerInterceptor, api) {
   const bar = document.createElement('div');
   bar.className = 'kt-bar';
 
-  const seekbar = createSeekbar();
+  const { live, wrap: infoWrap } = createInfo(store, actions, viewerInterceptor, api);
 
-  const controls = document.createElement('div');
-  controls.className = 'kt-controls';
+  const left = document.createElement('div'); left.className = 'kt-bar-left';
+  left.append(createPlayBtn(store, actions), live, createVolumeCtrl(store, actions), infoWrap);
 
-  const { live, wrap: infoWrap } = createInfo();
+  const right = document.createElement('div'); right.className = 'kt-bar-right';
+  right.append(createSpeedBtn(store, actions), createQualityBtn(store, actions), createFullscreenBtn(store, actions));
 
-  const left = document.createElement('div');
-  left.className = 'kt-bar-left';
-  left.append(createPlayBtn(), live, createVolumeCtrl(), infoWrap);
-
-  const right = document.createElement('div');
-  right.className = 'kt-bar-right';
-  right.append(createSpeedBtn(), createQualityBtn(), createFullscreenBtn());
-
+  const controls = document.createElement('div'); controls.className = 'kt-controls';
   controls.append(left, right);
-  bar.append(seekbar, controls);
+
+  bar.append(createSeekbar(store, actions), controls);
   return bar;
 }
 
-export function initBarHover(root, bar, container, topBar) {
-  let hideTimer = null;
-  let _lastPlaying = state.playing;
+export function initBarHover(root, bar, container, topBar, store) {
+  let hideTimer   = null;
 
   function hide() {
     bar.classList.remove('kt-bar-visible');
@@ -48,9 +42,7 @@ export function initBarHover(root, bar, container, topBar) {
     root.classList.remove('kt-idle');
     container.classList.remove('kt-idle');
     clearTimeout(hideTimer);
-    hideTimer = setTimeout(() => {
-      if (state.playing) hide();
-    }, 3000);
+    hideTimer = setTimeout(() => { if (store.getState().playing) hide(); }, CONTROLS_HIDE_DELAY_MS);
   }
 
   let _moveRaf = 0;
@@ -66,7 +58,7 @@ export function initBarHover(root, bar, container, topBar) {
       if (topBar) topBar.classList.remove('kt-top-bar-visible');
       root.classList.remove('kt-idle');
       container.classList.remove('kt-idle');
-    }, 500);
+    }, CONTROLS_LEAVE_DELAY_MS);
   });
 
   bar.addEventListener('mouseenter', () => {
@@ -83,23 +75,21 @@ export function initBarHover(root, bar, container, topBar) {
     });
   }
 
-  // Only react to actual changes in playing state — not every setState call.
-  // The position poll (500ms) and uptime ticker (1s) call setState constantly,
-  // which would otherwise call show() on every tick and reset the hide timer forever.
-  subscribe(({ playing }) => {
-    if (playing === _lastPlaying) return;
-    _lastPlaying = playing;
-
-    if (!playing) {
-      // Paused — show bars permanently until user plays again
-      clearTimeout(hideTimer);
-      bar.classList.add('kt-bar-visible');
-      if (topBar) topBar.classList.add('kt-top-bar-visible');
-      root.classList.remove('kt-idle');
-      container.classList.remove('kt-idle');
-    } else {
-      // Started playing — begin auto-hide countdown
-      show();
+  // Only react to actual playing state changes — not every setState tick.
+  // The position poll (500ms) and uptime ticker (1s) would otherwise reset
+  // the hide timer on every tick, keeping the controls visible forever.
+  store.select(
+    s => ({ playing: s.playing }),
+    ({ playing }) => {
+      if (!playing) {
+        clearTimeout(hideTimer);
+        bar.classList.add('kt-bar-visible');
+        if (topBar) topBar.classList.add('kt-top-bar-visible');
+        root.classList.remove('kt-idle');
+        container.classList.remove('kt-idle');
+      } else {
+        show();
+      }
     }
-  });
+  );
 }

@@ -1,28 +1,33 @@
-import { initAdapter } from './adapter.js';
-import { setupDvrContainer } from './dvr/controller.js';
-import { bindKeys, togglePlay, toggleFullscreen } from './actions.js';
-import { setState } from './state.js';
+// ── main.js ───────────────────────────────────────────────────────────────────
+// Entry point — wiring only. Creates the core services, wires them together,
+// and mounts the UI. No business logic lives here.
+
+import { createStore }             from './store.js';
+import { loadPrefs, savePrefs }    from './prefs.js';
+import { fetchChannelInit, fetchVodPlaybackUrl } from './api.js';
+import { createEngineManager }     from './engine-manager.js';
+import { createActions }           from './actions.js';
+import { createViewerInterceptor } from './services/viewer-interceptor.js';
 import { createBar, initBarHover } from './ui/bar.js';
-import { createOverlay } from './ui/overlay.js';
-import { createTopBar } from './ui/topbar.js';
+import { createOverlay }           from './ui/overlay.js';
+import { createTopBar }            from './ui/topbar.js';
 
 const CSS = '__SKIN_CSS__';
 
 function injectStyles(css) {
   const style = document.createElement('style');
-  style.id = 'kt-styles';
-  style.textContent = css;
+  style.id = 'kt-styles'; style.textContent = css;
+  document.head.appendChild(style);
+}
+
+function hideNativeControls() {
+  const style = document.createElement('style');
+  style.textContent = '.z-controls { display: none !important; }';
   document.head.appendChild(style);
 }
 
 function getUsername() {
   return location.pathname.replace(/^\//, '').split('/')[0] || '';
-}
-
-function hideNativeControls() {
-  const style = document.createElement('style');
-  style.textContent = `.z-controls { display: none !important; }`;
-  document.head.appendChild(style);
 }
 
 function createRoot(container) {
@@ -47,53 +52,60 @@ function waitForContainer(maxAttempts = 60) {
 }
 
 let _initialized = false;
+
 async function init() {
   if (_initialized) return;
   _initialized = true;
   try {
     const container = await waitForContainer();
+
+    // ── Core services ───────────────────────────────────────────────────────
+    const store   = createStore();
+    const prefs   = { load: loadPrefs, save: savePrefs };
+    const api     = { fetchChannelInit, fetchVodPlaybackUrl };
+    const viewer  = createViewerInterceptor();
+
+    // ── Engine layer ────────────────────────────────────────────────────────
+    const engines = createEngineManager(store, prefs, api);
+
+    // ── Actions — the only thing UI touches ────────────────────────────────
+    const actions = createActions(store, engines, prefs);
+
+    // ── UI ──────────────────────────────────────────────────────────────────
     injectStyles(CSS);
     hideNativeControls();
-    const username = getUsername();
-    setState({ username });
+    store.setState({ username: getUsername() });
 
     const root   = createRoot(container);
-    const topBar = createTopBar();
-    const bar    = createBar();
+    const topBar = createTopBar(store);
+    const bar = createBar(store, actions, viewer, api);
+    const overlay = createOverlay(store, actions);
 
-    root.appendChild(createOverlay());
-    root.appendChild(topBar);
-    root.appendChild(bar);
+    root.append(overlay, topBar, bar);
+    initBarHover(root, bar, container, topBar, store);
 
-    initBarHover(root, bar, container, topBar);
-
+    // ── Double-click: single click = play/pause, double = fullscreen ───────
     let _clickTimer = null;
     container.addEventListener('click', e => {
       if (bar.contains(e.target) || topBar.contains(e.target)) return;
       if (_clickTimer) {
-        clearTimeout(_clickTimer);
-        _clickTimer = null;
-        toggleFullscreen();
+        clearTimeout(_clickTimer); _clickTimer = null;
+        actions.toggleFullscreen();
       } else {
         _clickTimer = setTimeout(() => {
           _clickTimer = null;
-          togglePlay();
-        }, 250);
+          actions.togglePlay();
+        }, actions.DOUBLE_CLICK_WINDOW_MS);
       }
     });
 
-    initAdapter();
-    bindKeys();
+    // ── Init engines (IVS extraction + DVR container setup) ────────────────
+    await engines.init(container);
+    actions.bindKeys();
 
-    // Pre-create the DVR video element and load hls.js in the background.
-    // No URL is fetched here — DVR init happens lazily when the user seeks.
-    setupDvrContainer(container).catch(e => {
-      console.warn('[KickTiny DVR] Container setup failed:', e.message);
-    });
-
-    console.log('[KickTiny] Initialized for', username || 'unknown');
+    console.log('[KickTiny] Initialized for', getUsername() || 'unknown');
   } catch (e) {
-    console.warn(e.message);
+    console.warn('[KickTiny] init error:', e.message);
   }
 }
 
